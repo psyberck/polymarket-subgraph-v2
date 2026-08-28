@@ -4,3 +4,6 @@ generated
 .envio
 build
 dist
+
+logs/
+*.log
