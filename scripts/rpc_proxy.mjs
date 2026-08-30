@@ -73,8 +73,8 @@ const stats = {
   upstream: 0,
   throttled: 0,
   failed: 0,
-  queuePeak: 0,
-  byMethod: {},
+  maxQueueLength: 0,
+  methodCounter: {},
 };
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -101,21 +101,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // strict priority — strict priority can starve probes into the 30s viem
 // timeout, which falls back to merge pricing and mis-signs realized PnL.
 let active = 0;
-const queue = [];
+const Queue = [];
 
 async function acquire() {
   if (active < CONCURRENCY) {
     active++;
     return;
   }
-  stats.queuePeak = Math.max(stats.queuePeak, queue.length + 1);
-  await new Promise((resolve) => queue.push(resolve));
+  stats.maxQueueLength = Math.max(stats.maxQueueLength, Queue.length + 1);
+  await new Promise((resolve) => Queue.push(resolve));
   active++;
 }
 
 function release() {
   active--;
-  const next = queue.shift();
+  const next = Queue.shift();
   if (next) next();
 }
 
@@ -150,7 +150,7 @@ const looksLikeJson = (text) => {
  */
 async function callUpstream(payload) {
   for (const c of Array.isArray(payload) ? payload : [payload]) {
-    if (c && c.method) stats.byMethod[c.method] = (stats.byMethod[c.method] ?? 0) + 1;
+    if (c && c.method) stats.methodCounter[c.method] = (stats.methodCounter[c.method] ?? 0) + 1;
   }
   let delay = BASE_DELAY_MS;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -188,7 +188,6 @@ async function callUpstream(payload) {
     await sleep(Math.random() * Math.min(delay, MAX_DELAY_MS));
     delay *= 2;
   }
-  throw new Error('unreachable');
 }
 
 const server = http.createServer((req, res) => {
@@ -199,7 +198,7 @@ const server = http.createServer((req, res) => {
         {
           ...stats,
           active,
-          queued: queue.length,
+          queued: Queue.length,
         },
         null,
         2,
@@ -241,7 +240,8 @@ setInterval(() => {
   console.log(
     `[proxy] requests=${stats.requests} upstream=${stats.upstream} ` +
       `throttled=${stats.throttled} failed=${stats.failed} ` +
-      `active=${active} queued=${queue.length} ` +
-      `peak=${stats.queuePeak} methods=${JSON.stringify(stats.byMethod)}`,
+      `currActive=${active} currQueued=${Queue.length} ` +
+      `maxQueueLength=${stats.maxQueueLength} ` +
+      `methods=${JSON.stringify(stats.methodCounter)}`,
   );
 }, 30_000).unref();
