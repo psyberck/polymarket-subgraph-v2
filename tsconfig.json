@@ -6,7 +6,12 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node"],
+    "baseUrl": ".",
+    "paths": {
+      "@lib/*": ["src/lib/*"],
+      "@handlers/*": ["src/handlers/*"]
+    }
   },
   "include": ["src/**/*.ts", "envio-env.d.ts"]
 }
