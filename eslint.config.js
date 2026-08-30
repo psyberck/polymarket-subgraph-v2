@@ -34,4 +34,10 @@ export default defineConfig([
     files: ['**/*.js', '**/*.mjs', '**/*.cjs'],
     extends: [tseslint.configs.disableTypeChecked],
   },
+  {
+    files: ['scripts/**'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
 ]);
