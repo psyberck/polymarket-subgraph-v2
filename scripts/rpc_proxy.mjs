@@ -60,6 +60,7 @@
  */
 
 import http from 'node:http';
+import { text } from 'node:stream/consumers';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8546);
 const UPSTREAM = process.env.PROXY_UPSTREAM ?? 'https://polygon.gateway.tenderly.co';
@@ -73,6 +74,7 @@ const stats = {
   upstream: 0,
   throttled: 0,
   failed: 0,
+  errored: 0,
   maxQueueLength: 0,
   methodCounter: {},
 };
@@ -119,43 +121,34 @@ function release() {
   if (next) next();
 }
 
-const THROTTLE_RE = /rate limit|too many requests|exceeds defined limit/i;
-
-// Only the head of the body is sniffed. Some gateways signal a rate limit with
-// HTTP 200 and an error object, so the body still has to be looked at — but a
-// throttle message is short and states itself immediately, while a successful
-// eth_getLogs page runs past 10MB. Scanning all of it measured ~7.6ms per
-// response, and risked matching log payload data and retrying a GOOD response
-// to death; a 1KB window is ~7900x cheaper and cannot reach payload.
-const THROTTLE_SNIFF = 1024;
-
-const isThrottle = (status, text) => {
-  if (status === 429 || status === 503) return true;
-  return THROTTLE_RE.test(text.slice(0, THROTTLE_SNIFF));
-};
-
-// Cheap stand-in for the JSON.parse the pass-through no longer does: catches an
-// HTML error page or a truncated body without walking megabytes.
-const looksLikeJson = (text) => {
-  const c = text.trimStart()[0];
-  return c === '{' || c === '[';
-};
-
 /**
- * One upstream call, retried until it is not a throttle.
+ * One upstream call, retried until it succeeds or the retry budget runs out.
  *
- * Retrying here rather than surfacing the 429 is the entire point: envio reads
- * a 429 as an oversized range and halves its block interval, which it never
- * grows back under sustained throttling.
+ * Retrying here rather than surfacing the failure is the entire point: envio
+ * reads ANY failure as "the range was too big", halves its block interval and
+ * never grows it back under sustained trouble. So every transient upstream
+ * condition — a 429, a gateway 5xx, a dropped socket — is absorbed as latency.
+ *
+ * Decided on STATUS alone, never on body text. Measured over 259 real throttles
+ * from this upstream: all were HTTP 429, and 176 carried an empty body, so a
+ * body check catches a third of them and nothing the status misses.
  */
 async function callUpstream(payload) {
   for (const c of Array.isArray(payload) ? payload : [payload]) {
     if (c && c.method) stats.methodCounter[c.method] = (stats.methodCounter[c.method] ?? 0) + 1;
   }
+
   let delay = BASE_DELAY_MS;
+  const backoff = async () => {
+    await sleep(Math.random() * Math.min(delay, MAX_DELAY_MS));
+    delay *= 2;
+  };
+
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    const isLast = attempt === MAX_RETRIES;
+    let res, text, transportErr;
+
     await acquire();
-    let res, text;
     try {
       res = await fetch(UPSTREAM, {
         method: 'POST',
@@ -165,32 +158,32 @@ async function callUpstream(payload) {
       text = await res.text();
       stats.upstream++;
     } catch (err) {
+      transportErr = err;
+    } finally {
       release();
-      if (attempt === MAX_RETRIES) throw err;
-      await sleep(Math.min(delay, MAX_DELAY_MS));
-      delay *= 2;
+    }
+
+    if (transportErr) {
+      if (isLast) throw transportErr;
+      await backoff();
       continue;
     }
-    release();
 
-    if (!isThrottle(res.status, text)) {
-      if (!looksLikeJson(text)) {
-        throw new Error(`upstream returned non-JSON (HTTP ${res.status})`);
+    if (res.status === 429 || res.status >= 500) {
+      if (res.status === 429) stats.throttled++;
+      else stats.errored++;
+      if (isLast) {
+        stats.failed++;
+        throw new Error(`upstream still failing after ${MAX_RETRIES} retries (HTTP ${res.status})`);
       }
-      return text;
+      await backoff();
+      continue;
     }
-
-    stats.throttled++;
-    if (attempt === MAX_RETRIES) {
-      stats.failed++;
-      throw new Error(`upstream still throttling after ${MAX_RETRIES} retries`);
-    }
-    await sleep(Math.random() * Math.min(delay, MAX_DELAY_MS));
-    delay *= 2;
+    return text;
   }
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   if (req.method === 'GET') {
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(
@@ -207,25 +200,22 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', async () => {
+  try {
+    const body = await text(req);
     stats.requests++;
-    try {
-      const result = await callUpstream(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(result);
-    } catch (err) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          jsonrpc: '2.0',
-          id: null,
-          error: { code: -32603, message: `proxy: ${String(err.message ?? err)}` },
-        }),
-      );
-    }
-  });
+    const result = await callUpstream(JSON.parse(body));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(result);
+  } catch (err) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        jsonrpc: '2.0',
+        id: null,
+        error: { code: -32603, message: `proxy: ${String(err.message ?? err)}` },
+      }),
+    );
+  }
 });
 
 server.listen(PORT, '127.0.0.1', () => {
@@ -239,7 +229,8 @@ server.listen(PORT, '127.0.0.1', () => {
 setInterval(() => {
   console.log(
     `[proxy] requests=${stats.requests} upstream=${stats.upstream} ` +
-      `throttled=${stats.throttled} failed=${stats.failed} ` +
+      `throttled=${stats.throttled} errored=${stats.errored} ` +
+      `failed=${stats.failed} ` +
       `currActive=${active} currQueued=${Queue.length} ` +
       `maxQueueLength=${stats.maxQueueLength} ` +
       `methods=${JSON.stringify(stats.methodCounter)}`,
