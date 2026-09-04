@@ -9,7 +9,7 @@
  */
 
 import { indexer } from 'envio';
-import { applyBuy, applySell, decodeFill, fillPrice } from '@lib/position';
+import { applyBuy, applySell, decodeFill, getFillPrice } from '@lib/position';
 import { mutatePosition } from '@lib/store';
 
 indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ event, context }) => {
@@ -19,7 +19,7 @@ indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ ev
     event.params.takerAmountFilled,
   );
 
-  const price = tokens > 0n ? fillPrice(tokens, usdc) : 0n;
+  const price = tokens > 0n ? getFillPrice(tokens, usdc) : 0n;
 
   context.Fill.set({
     id: `${event.block.number}-${event.logIndex}`,
