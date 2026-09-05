@@ -32,7 +32,7 @@ export const CONDITIONAL_TOKENS = getAddress('0x4d97dcd97ec945f40cf65f87097ace5e
 
 export const RPC_URL = process.env.POLYGON_RPC_URL ?? 'https://polygon.gateway.tenderly.co';
 
-export const rpc = createPublicClient({
+export const client = createPublicClient({
   chain: polygon,
   transport: http(RPC_URL, { retryCount: 5, retryDelay: 500, timeout: 30_000 }),
   batch: {
