@@ -45,13 +45,6 @@
  * reverse lookup, so a position becomes reversible once a lifecycle event has
  * named its condition; a pUSD position acquired purely by trade stays
  * unresolvable, exactly as it is today.
- *
- * KNOWN GAP. That guarantee holds against the `Token` entity but not against
- * the memo in front of it. handlers/AdapterTransfers.ts records a negative for
- * an id no tier could resolve, and nothing invalidates it when a later
- * lifecycle event writes the row here — so within a run such an id can stay
- * unresolvable after it has become resolvable. Dormant while every
- * non-canonical collateral is negligible and no `Token` row is ever written.
  */
 
 import { createEffect, type EvmOnEventContext, S } from 'envio';
