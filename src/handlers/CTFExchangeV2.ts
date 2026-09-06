@@ -51,8 +51,7 @@ indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ ev
     context,
     event,
     event.params.maker,
-    event.params.tokenId,
-    undefined,
+    { tokenId: event.params.tokenId },
     (s) => (isBuy ? applyBuy(s, price, tokens) : applySell(s, price, tokens)),
     event.params.fee,
   );
