@@ -10,7 +10,9 @@ import { DatabaseSync } from 'node:sqlite';
 import { encodePacked, keccak256 } from 'viem';
 import { SizedCache } from '@lib/types';
 
-export interface TokenCondition {
+/** An outcome token, fully identified: which condition, which outcome, which id. */
+export interface OutcomeToken {
+  tokenId: bigint;
   conditionId: string;
   outcomeIndex: number;
 }
@@ -38,7 +40,7 @@ export const MAX_CACHE_SIZE = parseCacheSize();
 const NEG_RISK_ADAPTER = '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296' as const;
 
 const marketCache = new SizedCache<bigint[]>(MAX_CACHE_SIZE);
-const tableTokenCache = new SizedCache<TokenCondition>(MAX_CACHE_SIZE);
+const tableTokenCache = new SizedCache<OutcomeToken>(MAX_CACHE_SIZE);
 const resolutionCache = new SizedCache<number | null>(MAX_CACHE_SIZE);
 const negRiskCache = new SizedCache<number>(MAX_CACHE_SIZE);
 const negRiskMarketCache = new SizedCache<number>(MAX_CACHE_SIZE);
@@ -203,7 +205,7 @@ export function resolveConditionTokens(conditionId: string): bigint[] {
  * tells memoDb to keep nothing. "Not in the table" is only half an answer, and
  * the negative belongs to whoever has asked the other half too.
  */
-export function resolveTokenCondition(tokenId: bigint): TokenCondition | null {
+export function resolveTokenCondition(tokenId: bigint): OutcomeToken | null {
   const key = tokenId.toString();
   return (
     memoDb(tableTokenCache, 'resolveTokenCondition', key, () => {
@@ -217,7 +219,7 @@ export function resolveTokenCondition(tokenId: bigint): TokenCondition | null {
         );
         return undefined;
       }
-      return { conditionId: row.condition_id, outcomeIndex: Number(row.outcome_index) };
+      return { conditionId: row.condition_id, tokenId, outcomeIndex: Number(row.outcome_index) };
     }) ?? null
   );
 }
@@ -260,12 +262,35 @@ export function conditionResolutionIndex(conditionId: string): number | null {
  * the set. A split's `partition` is the list of such masks covering the full
  * set; a redemption's `indexSets` are the ones being redeemed.
  */
-export function indexSetToOutcomes(indexSet: bigint): number[] {
+function indexSetToOutcomes(indexSet: bigint): number[] {
   const out: number[] = [];
   for (let i = 0, rest = indexSet; rest > 0n; i++, rest >>= 1n) {
     if (rest & 1n) out.push(i);
   }
   return out;
+}
+
+/**
+ * The legs a list of index-set bitmasks names, out of a condition's ordered
+ * token ids.
+ *
+ * `all` is indexed by outcome, so an index set naming an outcome the caller has
+ * no token id for contributes nothing rather than an undefined leg — which is
+ * what keeps a partial `all` from producing legs that cannot be booked.
+ */
+export function indexSetsToLegs(
+  conditionId: string,
+  all: bigint[],
+  indexSets: readonly bigint[],
+): OutcomeToken[] {
+  const legs: OutcomeToken[] = [];
+  for (const set of indexSets) {
+    for (const outcomeIndex of indexSetToOutcomes(set)) {
+      const tokenId = all[outcomeIndex];
+      if (tokenId !== undefined) legs.push({ conditionId, tokenId, outcomeIndex });
+    }
+  }
+  return legs;
 }
 
 // ── Neg-risk market -> its questions ───────────────────────────────
