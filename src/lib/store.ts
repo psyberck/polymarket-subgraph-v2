@@ -109,12 +109,13 @@ export async function mutatePosition(
   context: EvmOnEventContext,
   event: EventCtx,
   user: string,
-  tokenId: bigint,
-  conditionId: string | undefined,
+  token: { tokenId: bigint; conditionId?: string },
   fn: (s: PositionState) => PositionState,
   fee: bigint = 0n,
 ): Promise<void> {
   if (isProtocolAddress(user)) return;
+
+  const { tokenId, conditionId } = token;
 
   const walletAddress = user.toLowerCase();
   const id = getPositionId(walletAddress, tokenId);
