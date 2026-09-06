@@ -42,7 +42,7 @@ async function resolveLegs(
  * union of every event on every contract, which is why it answers nothing about
  * params; naming the two here narrows it to the pair this helper handles.
  */
-type SplitOrMergeEvent =
+type Event =
   EvmEvent<'ConditionalTokens', 'PositionSplit'> | EvmEvent<'ConditionalTokens', 'PositionsMerge'>;
 
 /**
@@ -54,7 +54,7 @@ type SplitOrMergeEvent =
  */
 async function applyLegs(
   context: EvmOnEventContext,
-  event: SplitOrMergeEvent,
+  event: Event,
   apply: (s: PositionState, price: bigint, amount: bigint) => PositionState,
 ): Promise<void> {
   const legs = await resolveLegs(
