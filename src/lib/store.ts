@@ -6,22 +6,9 @@
  * state) and UserPositionVersion (immutable history) can never diverge.
  */
 
-import type { EvmOnEventContext } from 'envio';
+import type { EvmEvent, EvmOnEventContext } from 'envio';
 import type { PositionState } from '@lib/position';
 import { EMPTY } from '@lib/position';
-
-/**
- * The only parts of an event this module stamps onto a version row.
- *
- * Structural rather than envio's per-event type: mutatePosition is called from
- * five handlers across three contracts, whose event types share no common
- * ancestor. Widening to their union would name every one of them here and
- * force an edit whenever a handler is added.
- */
-export interface EventCtx {
-  block: { number: number; timestamp: number };
-  logIndex: number;
-}
 
 export const getPositionId = (user: string, tokenId: bigint) =>
   `${user.toLowerCase()}-${tokenId.toString()}`;
@@ -107,7 +94,7 @@ export const isProtocolAddress = (a: string) => PROTOCOL_ADDRESSES.has(a.toLower
  */
 export async function mutatePosition(
   context: EvmOnEventContext,
-  event: EventCtx,
+  event: EvmEvent,
   user: string,
   token: { tokenId: bigint; conditionId?: string },
   fn: (s: PositionState) => PositionState,
