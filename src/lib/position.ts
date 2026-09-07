@@ -153,7 +153,13 @@ export function negRiskYesPrice(noPrice: bigint, noCount: number, yesCount: numb
 //
 // v2 OrderFilled carries `side` directly (v1 required inferring direction
 // from which asset id was zero). `side` describes the MAKER's order.
+//
+// The values are the contract's own encoding, so decodeFill can compare a raw
+// event param against them. `Side` narrows that to the two the protocol
+// defines, for callers naming a direction rather than reading one off an event.
 export const SIDE_BUY = 0;
+export const SIDE_SELL = 1;
+export type Side = typeof SIDE_BUY | typeof SIDE_SELL;
 
 /**
  * Resolve one OrderFilled into what the MAKER did.
