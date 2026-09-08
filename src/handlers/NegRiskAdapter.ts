@@ -225,8 +225,20 @@ indexer.onEvent(
       );
     }
 
-    if (noCnt === 0 || noCnt >= count) {
-      context.log.warn(`${noCnt} no tokens /${count} total tokens`);
+    if (noCnt === 0) {
+      context.log.warn(
+        `PositionsConverted resolved no NO legs: stakeholder=${stakeholder} ` +
+          `market=${marketId} indexSet=${indexSet} questions=${count} ` +
+          `block=${event.block.number}`,
+      );
+      return;
+    }
+    if (noCnt >= count) {
+      context.log.warn(
+        `PositionsConverted covers all ${count} questions, no YES legs to price: ` +
+          `stakeholder=${stakeholder} market=${marketId} indexSet=${indexSet} ` +
+          `block=${event.block.number}`,
+      );
       return;
     }
 
