@@ -74,4 +74,4 @@ const parseOrderFilled = (event: OrderFilled): Order => {
 };
 
 export { parseOrderFilled };
-export type { Order };
+export type { Order, OrderFilled };
