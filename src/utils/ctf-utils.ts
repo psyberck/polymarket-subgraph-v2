@@ -1,0 +1,134 @@
+import { encodePacked, getAddress, keccak256 } from 'viem';
+
+/**
+ * Gnosis CTF collection- and position-id derivation, computed locally.
+ *
+ * A port of `CTHelpers.sol` from gnosis/conditional-tokens-contracts, by way of
+ * the retired subgraph's `common/utils/ctf-utils.ts`. Parent collection ids are
+ * ignored: Polymarket never uses them, and every id this project resolves has
+ * the zero parent.
+ *
+ * Deriving an id has two halves, and only the first is expensive:
+ *
+ * ```text
+ * collectionId = f(conditionId, outcomeIndex)        alt_bn128 point search
+ * positionId   = keccak256(collateral ‖ collectionId)
+ * ```
+ *
+ * The collection id does NOT depend on the collateral, so one point search
+ * serves every collateral that condition is denominated in. That is what makes
+ * this worth computing rather than fetching: `getCollectionId` on
+ * ConditionalTokens returns the same value forever, so an RPC round trip buys
+ * nothing a pure function cannot.
+ */
+
+/** The alt_bn128 field prime. Curve is y² = x³ + 3 over F_P. */
+const P = 21888242871839275222246405745257275088696311157297823662689037894645226208583n;
+
+/** Curve constant `b` in y² = x³ + b. */
+const B = 3n;
+
+/**
+ * `base ** exponent mod P`, by binary expansion of the exponent.
+ *
+ * Square-and-multiply rather than anything cleverer: the exponent here is a
+ * fixed 254-bit constant, so this is ~254 modular squarings per call and there
+ * is no input-dependent path worth optimising.
+ */
+function powModP(base: bigint, exponent: bigint): bigint {
+  let result = 1n;
+  let b = base % P;
+  let e = exponent;
+
+  while (e > 0n) {
+    if (e & 1n) result = (result * b) % P;
+    b = (b * b) % P;
+    e >>= 1n;
+  }
+
+  return result;
+}
+
+/**
+ * Euler's criterion: `a ** ((P-1)/2) mod P`.
+ *
+ * Returns `1n` when `a` is a non-zero quadratic residue mod P — i.e. a square,
+ * i.e. an x for which the curve has a y. Returns `P - 1n` when it is not, and
+ * `0n` only for `a === 0n`.
+ */
+function legendreSymbol(a: bigint): bigint {
+  return powModP(a, (P - 1n) >> 1n);
+}
+
+/** Left-pad a bigint to a bare 32-byte hex string, no `0x`. */
+function toWord(value: bigint): string {
+  return value.toString(16).padStart(64, '0');
+}
+
+/**
+ * The collection id for a single outcome of a condition.
+ *
+ * `keccak256(conditionId ‖ indexSet)` is treated as a candidate x-coordinate
+ * and incremented until it lands on the curve, which is what the CTF does to
+ * map an arbitrary hash onto a group element. The high bit of the hash is
+ * carried separately as a sign, toggled into bit 254 of the result.
+ *
+ * @param conditionId - 0x-prefixed 32-byte condition id.
+ * @param outcomeIndex - Zero-based outcome. The index set is `1 << outcomeIndex`,
+ *   i.e. the singleton set naming just this outcome.
+ * @returns 0x-prefixed 32-byte collection id.
+ *
+ * @remarks
+ * The index set is written as a full 32-byte word. The subgraph's version
+ * assigns it to a single byte (`hashPayload[63] = 1 << outcomeIndex`), which
+ * silently wraps to zero at `outcomeIndex >= 8`. Harmless there — that code is
+ * binary-only — but this project prices conditions with up to 7 outcomes and
+ * has no reason to inherit the ceiling.
+ *
+ * The search loop terminates quickly: about half the field is a quadratic
+ * residue, so the expected number of iterations is ~2.
+ */
+function computeCollectionId(conditionId: string, outcomeIndex: number): `0x${string}` {
+  const indexSet = 1n << BigInt(outcomeIndex);
+  const payload = `0x${conditionId.slice(2).toLowerCase().padStart(64, '0')}${toWord(indexSet)}`;
+
+  const hash = BigInt(keccak256(payload as `0x${string}`));
+
+  // The top bit is not part of the x-coordinate; it selects which of the two
+  // roots (y, -y) the collection id stands for.
+  const odd = hash >> 255n !== 0n;
+
+  let x = hash;
+  let yy: bigint;
+
+  do {
+    x = (x + 1n) % P;
+    yy = (((x * x) % P) * x + B) % P;
+  } while (legendreSymbol(yy) !== 1n);
+
+  if (odd) {
+    const oddToggle = 1n << 254n;
+    x = (x & oddToggle) === 0n ? x + oddToggle : x - oddToggle;
+  }
+
+  return `0x${toWord(x)}`;
+}
+
+/**
+ * The ERC-1155 token id for an outcome, denominated in a given collateral.
+ *
+ * @param collateral - Collateral token address. Case-insensitive; checksummed
+ *   internally, though the packed encoding is byte-identical either way.
+ * @param conditionId - 0x-prefixed 32-byte condition id.
+ * @param outcomeIndex - Zero-based outcome.
+ * @returns The position id, as the decimal-valued bigint the CTF uses.
+ */
+function computePositionId(collateral: string, conditionId: string, outcomeIndex: number): bigint {
+  const collectionId = computeCollectionId(conditionId, outcomeIndex);
+
+  return BigInt(
+    keccak256(encodePacked(['address', 'bytes32'], [getAddress(collateral), collectionId])),
+  );
+}
+
+export { computeCollectionId, computePositionId };
