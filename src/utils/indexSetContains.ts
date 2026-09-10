@@ -9,17 +9,12 @@
  *
  * @param indexSet - The conversion's bitmask, as emitted by `PositionsConverted`.
  * @param index - Zero-based question index to test. Must be a non-negative
- *   integer — the caller guarantees it, iterating `0 <= i < questionCount`
- *   (`NegRiskAdapter.ts:88`). A negative `index` would not throw: BigInt `>>`
+ *   integer — the caller guarantees it, iterating `0 <= i < questionCount`.
+ *   A negative `index` would not throw: BigInt `>>`
  *   with a negative count shifts the other way, so the answer would silently
  *   be about the wrong bit.
  * @returns `true` when bit `index` is set. An `index` past the mask's highest
  *   set bit is simply not a member, so it returns `false` rather than failing.
- *
- * @remarks
- * Identical in behaviour to `indexSetContains` in `lib/conditionTokens.ts`
- * (line 382) — same expression, arrow function instead of a declaration. That
- * one is what `NegRiskAdapter.ts` imports today.
  *
  * @example
  * ```ts

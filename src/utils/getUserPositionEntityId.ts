@@ -11,7 +11,7 @@
  * Lower-casing belongs here rather than at the call sites. Addresses arrive in
  * whatever case the log carried, and a checksummed address and its lower-case
  * form would otherwise be two positions for one wallet. Callers that already
- * normalise (`updateUserPositionWithBuy.ts:24`, `store.ts:124`) pass a
+ * normalise (`updateUserPositionWithBuy.ts:24`) pass a
  * lower-cased string in, so the second call is a no-op — keeping it makes the
  * canonical form a property of the id instead of something every caller has to
  * remember.
@@ -20,20 +20,18 @@
  * or a zero-padded form is a different id for the same position, and matches
  * neither the seed nor the rows already written.
  *
- * @param user - Wallet address, in any case. Lower-cased here.
- * @param tokenId - ERC-1155 outcome token id (a CTF position id), as emitted.
- * @returns The `UserPosition.id`.
- *
- * @remarks
- * The single renderer of this id. `lib/store.ts` used to carry an identical
- * expression under the name `getPositionId`, which collided with the CTF
- * helper of that name in `utils/getPositionId.ts` — a token id, not an entity
- * id. The subgraph separates the two the same way, and now so does this.
+ * The single renderer of this id. Not `getPositionId` in
+ * `utils/getPositionId.ts`, which builds a CTF token id from a condition and an
+ * outcome — the subgraph keeps both names and separates them the same way.
  *
  * Nothing splits the id back apart today, so the format's only standing
  * contract is that it does not change. The `-` would be an unambiguous
  * separator if that ever did become necessary, since neither a lower-case hex
  * address nor a decimal integer contains one.
+ *
+ * @param user - Wallet address, in any case. Lower-cased here.
+ * @param tokenId - ERC-1155 outcome token id (a CTF position id), as emitted.
+ * @returns The `UserPosition.id`.
  *
  * @example
  * ```ts

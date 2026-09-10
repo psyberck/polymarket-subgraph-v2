@@ -6,7 +6,7 @@
  * settling the match rather than the other side of it — a real counterparty
  * emits its own OrderFilled — so booking both sides double-counts matched
  * trades and invents positions for protocol addresses. `parseOrderFilled`
- * enforces that, the same way `decodeFill` does for the handler.
+ * enforces that.
  */
 
 import { indexer } from 'envio';

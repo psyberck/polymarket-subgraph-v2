@@ -8,9 +8,9 @@ import { computePositionId } from '@utils/ctf-utils';
  * in USDC.e — the choice the subgraph's getPositionId made, with the same name
  * and argument order.
  *
- * NOT `getPositionId` in `lib/store.ts`, which builds a UserPosition entity id
- * from a wallet and a token. The subgraph keeps both names too and separates
- * them the same way: that one is getUserPositionEntityId.
+ * NOT the UserPosition entity id, which is built from a wallet and a token by
+ * `getUserPositionEntityId`. The subgraph keeps both names and separates them
+ * the same way.
  *
  * @param conditionId - 0x-prefixed 32-byte condition id.
  * @param outcomeIndex - Zero-based outcome.

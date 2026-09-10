@@ -36,28 +36,22 @@ type OrderFilled = EvmEvent<'CTFExchangeV2', 'OrderFilled'>;
  * v2 carries a single `tokenId`, so `positionId` is the same either way — the
  * maker/taker asset-id pair is a v1 shape and has no equivalent here.
  *
- * @param event - A decoded `CTFExchangeV2.OrderFilled` log.
- * @returns The maker's side of the fill. Never the taker's — see the remarks.
- *
- * @remarks
  * Only the maker is booked. `taker` is the operator settling the match, not a
  * counterparty taking the other side — a genuine counterparty emits its own
- * `OrderFilled`, so booking `taker` as well both invents positions for
- * protocol addresses and double-counts every trade that has one. The reference
- * indexer and the retired subgraph are maker-only for the same reason.
+ * `OrderFilled`, so booking `taker` as well both invents positions for protocol
+ * addresses and double-counts every trade that has one. The reference subgraph
+ * is maker-only for the same reason.
  *
  * `side` is a `uint8` on the wire and reaches us as a `bigint`, so it is
  * compared against `0n`. Comparing against `0` is always false and would book
  * every fill as a SELL, inverting the legs on every buy.
  *
- * Same decode as `decodeFill` in `lib/position.ts`, which is what the handler
- * calls today: `baseAmount` is its `tokens`, `quoteAmount` its `usdc`, and
- * `side` its `isBuy`. This adds `account` and `positionId`, which that one
- * leaves to the caller to pull off the event.
- *
  * `account` is passed through unmodified. Consumers that key on it need their
- * own `.toLowerCase()` — `Fill.maker` and `mutatePosition` (`store.ts:107`)
- * both do this themselves.
+ * own `.toLowerCase()`: the `OrderFilled` row lower-cases where it is written,
+ * and the position helpers lower-case before building the entity id.
+ *
+ * @param event - A decoded `CTFExchangeV2.OrderFilled` log.
+ * @returns The maker's side of the fill. Never the taker's.
  */
 const parseOrderFilled = (event: OrderFilled): Order => {
   const { maker, side, tokenId, makerAmountFilled, takerAmountFilled } = event.params;

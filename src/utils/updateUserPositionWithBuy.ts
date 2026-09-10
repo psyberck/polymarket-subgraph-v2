@@ -5,15 +5,22 @@ import { loadUserPosition } from '@utils/loadUserPosition';
  * Book a buy: move the volume-weighted entry price, add to the balance and to
  * cumulative tokens bought, then persist.
  *
- * The arithmetic is `applyBuy` (`position.ts:58`) inlined — same integer
- * volume-weighted mean, same `totalBought` in TOKENS rather than USDC. Nothing
- * realizes on a buy, so the only thing that moves realized PnL here is the
- * fee.
+ * `avgPrice` is an integer volume-weighted mean, and `totalBought` accumulates
+ * TOKENS rather than USDC — verified against the retired subgraph's own output,
+ * where `total_bought` equals `amount` exactly on positions never sold.
+ * Nothing realizes on a buy, so the only thing that moves realized PnL here is
+ * the fee.
  *
  * A buy of zero or fewer tokens writes NOTHING AT ALL, not even the fee: the
- * whole body is inside `if (amount > 0n)`. `applyBuy` returns the state
- * unchanged in that case and `mutatePosition` still persists it, so the two
- * disagree about a zero-token fill that carries a fee — see the remarks.
+ * whole body is inside `if (amount > 0n)`.
+ *
+ * ⚠️ PROTOCOL ADDRESSES ARE NOT FILTERED. Exchanges and the collateral
+ * adapters appear as a party to position movement without ever holding a
+ * position of their own — an adapter named as split stakeholder is the
+ * load-bearing case — and booking them invents wallets that hold millions of
+ * tokens. Nothing in this path drops them, so the caller must, before it gets
+ * here. Same for the sell leg; it is a whole-write-path concern rather than
+ * buy-leg arithmetic, which is why it is not duplicated into both.
  *
  * @param context - Handler context; the entity store is written through it.
  * @param event - The fill being booked. Only its block/log position is used,
@@ -24,22 +31,10 @@ import { loadUserPosition } from '@utils/loadUserPosition';
  * @param price - Fill price, 1e6 (0.42 -> 420000).
  * @param amount - Outcome TOKENS acquired, 1e6.
  * @param conditionId - Condition this token belongs to, when the caller knows
- *   it. Optional, as on `mutatePosition`: split and merge events carry it,
- *   but a fill does not learn it until Gamma metadata lands, so
- *   `ExchangeMapping.ts` omits it and the column stays null until a later
- *   event supplies one.
+ *   it. Optional: split and merge events carry it, but a fill does not learn it
+ *   until Gamma metadata lands, so `ExchangeMapping.ts` omits it and the column
+ *   stays null until a later event supplies one.
  * @param fee - Fee paid on this fill, 1e6. Accumulates into `feesPaid`.
- *
- * @remarks
- * This is the `utils/` port of `mutatePosition` (`store.ts:112`) specialised to
- * the buy leg. The PnL arithmetic agrees with it exactly, verified by replaying
- * 20,000 randomised buys through both. ONE DIVERGENCE REMAINS:
- *
- * No `isProtocolAddress` guard. `mutatePosition` drops protocol addresses
- * before anything is written; without it, adapter-stakeholder activity books a
- * position to the adapter as well as to the wallet. That is a whole-write-path
- * concern rather than buy-leg arithmetic, so it belongs wherever the buy and
- * sell helpers are called from — not duplicated into each.
  */
 const updateUserPositionWithBuy = async (
   context: EvmOnEventContext,
