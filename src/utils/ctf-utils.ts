@@ -66,7 +66,13 @@ function toWord(value: bigint): string {
 }
 
 /**
- * The collection id for a single outcome of a condition.
+ * The collection id for an arbitrary index set over a condition's outcomes.
+ *
+ * This is the CTF primitive — `getCollectionId(0x0, conditionId, indexSet)`.
+ * An index set is a bitmask of outcomes, so one outcome is the singleton
+ * `1 << outcomeIndex`, which `computeCollectionId` wraps. Sets with more than
+ * one bit are legitimate collections, and the raw form is exposed because
+ * scripts/ctf_parity.ts needs it to identify ids built under other conventions.
  *
  * `keccak256(conditionId ‖ indexSet)` is treated as a candidate x-coordinate
  * and incremented until it lands on the curve, which is what the CTF does to
@@ -74,22 +80,19 @@ function toWord(value: bigint): string {
  * carried separately as a sign, toggled into bit 254 of the result.
  *
  * @param conditionId - 0x-prefixed 32-byte condition id.
- * @param outcomeIndex - Zero-based outcome. The index set is `1 << outcomeIndex`,
- *   i.e. the singleton set naming just this outcome.
+ * @param indexSet - Bitmask of outcomes, written as a full 32-byte word.
  * @returns 0x-prefixed 32-byte collection id.
  *
  * @remarks
  * The index set is written as a full 32-byte word. The subgraph's version
  * assigns it to a single byte (`hashPayload[63] = 1 << outcomeIndex`), which
- * silently wraps to zero at `outcomeIndex >= 8`. Harmless there — that code is
- * binary-only — but this project prices conditions with up to 7 outcomes and
- * has no reason to inherit the ceiling.
+ * silently wraps to zero at `outcomeIndex >= 8` and cannot express a
+ * multi-outcome set at all.
  *
  * The search loop terminates quickly: about half the field is a quadratic
  * residue, so the expected number of iterations is ~2.
  */
-function computeCollectionId(conditionId: string, outcomeIndex: number): `0x${string}` {
-  const indexSet = 1n << BigInt(outcomeIndex);
+function collectionIdForIndexSet(conditionId: string, indexSet: bigint): `0x${string}` {
   const payload = `0x${conditionId.slice(2).toLowerCase().padStart(64, '0')}${toWord(indexSet)}`;
 
   const hash = BigInt(keccak256(payload as `0x${string}`));
@@ -115,20 +118,30 @@ function computeCollectionId(conditionId: string, outcomeIndex: number): `0x${st
 }
 
 /**
- * The ERC-1155 token id for an outcome, denominated in a given collateral.
+ * The ERC-1155 token id for an index set, denominated in a given collateral.
  *
  * @param collateral - Collateral token address. Case-insensitive; checksummed
  *   internally, though the packed encoding is byte-identical either way.
  * @param conditionId - 0x-prefixed 32-byte condition id.
- * @param outcomeIndex - Zero-based outcome.
+ * @param indexSet - Bitmask of outcomes.
  * @returns The position id, as the decimal-valued bigint the CTF uses.
  */
-function computePositionId(collateral: string, conditionId: string, outcomeIndex: number): bigint {
-  const collectionId = computeCollectionId(conditionId, outcomeIndex);
+function positionIdForIndexSet(collateral: string, conditionId: string, indexSet: bigint): bigint {
+  const collectionId = collectionIdForIndexSet(conditionId, indexSet);
 
   return BigInt(
     keccak256(encodePacked(['address', 'bytes32'], [getAddress(collateral), collectionId])),
   );
 }
 
-export { computeCollectionId, computePositionId };
+/** The collection id for one outcome: the singleton index set `1 << outcomeIndex`. */
+function computeCollectionId(conditionId: string, outcomeIndex: number): `0x${string}` {
+  return collectionIdForIndexSet(conditionId, 1n << BigInt(outcomeIndex));
+}
+
+/** The token id for one outcome, denominated in `collateral`. */
+function computePositionId(collateral: string, conditionId: string, outcomeIndex: number): bigint {
+  return positionIdForIndexSet(collateral, conditionId, 1n << BigInt(outcomeIndex));
+}
+
+export { collectionIdForIndexSet, computeCollectionId, computePositionId, positionIdForIndexSet };
