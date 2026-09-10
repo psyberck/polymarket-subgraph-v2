@@ -25,11 +25,10 @@
  * @returns The `UserPosition.id`.
  *
  * @remarks
- * Identical in behaviour to `getPositionId` in `lib/store.ts:13` — same
- * expression, and the two must stay that way, because they key the same table.
- * That one is what the live handlers call (`store.ts:125`,
- * `NegRiskAdapter.ts:219`); this one is called from
- * `updateUserPositionWithBuy.ts:25`.
+ * The single renderer of this id. `lib/store.ts` used to carry an identical
+ * expression under the name `getPositionId`, which collided with the CTF
+ * helper of that name in `utils/getPositionId.ts` — a token id, not an entity
+ * id. The subgraph separates the two the same way, and now so does this.
  *
  * Nothing splits the id back apart today, so the format's only standing
  * contract is that it does not change. The `-` would be an unambiguous
