@@ -23,9 +23,11 @@ import { loadUserPosition } from '@utils/loadUserPosition';
  *   column. `positionId` is the reference subgraph's name for the same value.
  * @param price - Fill price, 1e6 (0.42 -> 420000).
  * @param amount - Outcome TOKENS acquired, 1e6.
- * @param conditionId - Condition this token belongs to. Required here, unlike
- *   `mutatePosition`, which takes it optionally because a fill only learns it
- *   once Gamma metadata lands.
+ * @param conditionId - Condition this token belongs to, when the caller knows
+ *   it. Optional, as on `mutatePosition`: split and merge events carry it,
+ *   but a fill does not learn it until Gamma metadata lands, so
+ *   `ExchangeMapping.ts` omits it and the column stays null until a later
+ *   event supplies one.
  * @param fee - Fee paid on this fill, 1e6. Accumulates into `feesPaid`.
  *
  * @remarks
@@ -46,7 +48,7 @@ const updateUserPositionWithBuy = async (
   positionId: bigint,
   price: bigint,
   amount: bigint,
-  conditionId: string,
+  conditionId?: string,
   fee: bigint = 0n,
 ): Promise<void> => {
   const address = user.toLowerCase();
