@@ -1,0 +1,58 @@
+type UserPosition @storage(postgres: true, clickhouse: true) {
+  id: ID! # "{user}-{tokenId}", matches the old subgraph id format
+  user: String!
+  tokenId: BigInt!
+  conditionId: String
+
+  amount: BigInt! # current token balance, 1e6
+  avgPrice: BigInt! # volume-weighted entry price, 1e6 (0.42 -> 420000)
+  realizedPnl: BigInt! # realized on sells + redemptions, net of fees, 1e6
+  feesPaid: BigInt! # cumulative OrderFilled fees, 1e6
+  totalBought: BigInt! # cumulative outcome TOKENS bought, 1e6 (not USDC —
+  # verified against res/positions/2026-05.parquet, where the subgraph's
+  # total_bought equals amount exactly on positions that were never sold)
+
+  lastBlock: Int!
+  lastLogIndex: Int!
+  lastUpdatedAt: Int!
+}
+
+type OrderFilled @storage(postgres: true, clickhouse: true) {
+  id: ID! # "{blockNumber}-{logIndex}"
+  orderHash: String!
+  maker: String!
+  taker: String! # the operator settling the match, not the counterparty
+  exchange: String! # which of the three v2 exchanges emitted it
+  tokenId: BigInt!
+  side: Int! # the MAKER's side; 0 = buy
+  makerAmountFilled: BigInt!
+  takerAmountFilled: BigInt!
+  fee: BigInt!
+  tokens: BigInt! # outcome tokens moved
+  usdc: BigInt! # collateral moved, 1e6
+  price: BigInt! # usdc/tokens, 1e6
+  blockNumber: Int!
+  logIndex: Int!
+  timestamp: Int!
+}
+
+type NegRiskEvent @storage(postgres: true) {
+  id: ID! # negRiskMarketId
+  questionCount: Int!
+}
+
+type Condition @storage(postgres: true) {
+  id: ID! # conditionId
+  outcomeSlotCount: Int!
+  negRisk: Boolean!
+  negRiskMarketId: String # null when standalone or not yet seen
+  questionIndex: Int # which question of that event
+  payoutPrices: [BigInt!] # settled price per outcome, 1e6; null until resolved
+}
+
+type OutcomeToken @storage(postgres: true) {
+  id: ID! # tokenId, decimal string
+  conditionId: String!
+  outcomeIndex: Int!
+  collateral: String! # lower-case address this id is denominated in
+}

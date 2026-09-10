@@ -25,8 +25,6 @@ import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 // of the two may ever be loaded — both, and every fill is booked twice.
 indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ event, context }) => {
   const order = parseOrderFilled(event);
-  const isBuy = order.side === TradeType.BUY;
-
   const price =
     order.baseAmount > 0n ? (order.quoteAmount * COLLATERAL_SCALE) / order.baseAmount : 0n;
 
@@ -44,13 +42,13 @@ indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ ev
     tokens: order.baseAmount,
     usdc: order.quoteAmount,
     price,
-    isBuy,
     blockNumber: event.block.number,
     logIndex: event.logIndex,
     timestamp: event.block.timestamp,
   });
 
-  const mutate = isBuy ? updateUserPositionWithBuy : updateUserPositionWithSell;
+  const mutate =
+    order.side === TradeType.BUY ? updateUserPositionWithBuy : updateUserPositionWithSell;
   await mutate(
     context,
     event,
