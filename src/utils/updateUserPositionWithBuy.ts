@@ -19,9 +19,8 @@ import { loadUserPosition } from '@utils/loadUserPosition';
  * @param event - The fill being booked. Only its block/log position is used,
  *   to stamp the row.
  * @param user - Wallet address, in any case; lower-cased before use.
- * @param positionId - ERC-1155 outcome token id. Written to the `tokenId`
- *   column — `positionId` is the reference subgraph's name for the same value,
- *   the reference subgraph's name for the same value.
+ * @param positionId - ERC-1155 outcome token id, written to the `tokenId`
+ *   column. `positionId` is the reference subgraph's name for the same value.
  * @param price - Fill price, 1e6 (0.42 -> 420000).
  * @param amount - Outcome TOKENS acquired, 1e6.
  * @param conditionId - Condition this token belongs to. Required here, unlike

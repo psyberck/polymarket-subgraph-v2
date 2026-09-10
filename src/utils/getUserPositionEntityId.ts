@@ -22,7 +22,7 @@
  *
  * @param user - Wallet address, in any case. Lower-cased here.
  * @param tokenId - ERC-1155 outcome token id (a CTF position id), as emitted.
- * @returns The `UserPosition.id`, also stored as `UserPositionVersion.positionId`.
+ * @returns The `UserPosition.id`.
  *
  * @remarks
  * Identical in behaviour to `getPositionId` in `lib/store.ts:13` — same

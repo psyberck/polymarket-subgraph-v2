@@ -18,7 +18,7 @@ import { getUserPositionEntityId } from '@utils/getUserPositionEntityId';
  *
  * `lastBlock`, `lastLogIndex` and `lastUpdatedAt` default to `0` — placeholders
  * for "never written", overwritten from the event on the first `set()`
- * (`store.ts:171-173`). They are not meaningful block numbers and must not be
+ * (`store.ts:198-200`). They are not meaningful block numbers and must not be
  * compared against one.
  *
  * @param context - The handler's envio context; the entity store is read
@@ -29,6 +29,12 @@ import { getUserPositionEntityId } from '@utils/getUserPositionEntityId';
  *   `undefined`, so the two cases are indistinguishable to the caller by
  *   design — if you need to know whether the position existed, call
  *   `context.UserPosition.get()` directly.
+ *
+ * @remarks
+ * `realizedPnl` is stored NET of every fee the position has paid. To fold a
+ * buy or sell, work in gross — `realizedPnl + feesPaid` — and net the result
+ * again on the way out, as `mutatePosition` does (`store.ts:132`). Folding the
+ * net value directly re-subtracts the cumulative fee each time and compounds.
  */
 const loadUserPosition = async (
   context: EvmOnEventContext,
@@ -47,7 +53,6 @@ const loadUserPosition = async (
       amount: 0n,
       avgPrice: 0n,
       realizedPnl: 0n,
-      realizedPnlGross: 0n,
       feesPaid: 0n,
       totalBought: 0n,
       lastBlock: 0,
