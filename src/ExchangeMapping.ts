@@ -10,10 +10,42 @@
  */
 
 import { indexer } from 'envio';
-import { COLLATERAL_SCALE, TradeType } from '@utils/constants';
+import {
+  AUTO_REDEEMER,
+  COLLATERAL_SCALE,
+  COMBOS_EXCHANGE,
+  COMBOS_POSITION_MANAGER,
+  EXCHANGE,
+  EXCHANGE_V2,
+  EXCHANGE_V2_THIRD,
+  NEG_RISK_EXCHANGE,
+  NEG_RISK_EXCHANGE_V2,
+  TradeType,
+} from '@utils/constants';
 import { parseOrderFilled } from '@utils/parseOrderFilled';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
+
+/**
+ * Addresses that can be `maker` on a fill without owning the position.
+ *
+ * Mostly historical: this guard existed because the exchanges appeared as the
+ * TAKER on fills — 4,291 of 33,788 positions, 12.7%, on a 3,200-block sample —
+ * and fills are booked maker-only now, so that pathway is largely gone. It
+ * stays because the AutoRedeemer and the Combos contracts can still act as
+ * maker on a user's behalf, and because a backfill reaching before the v2
+ * cutover sees the v1 exchanges as maker directly.
+ */
+const ORDER_FILLED_NON_USER_ADDRESSES: string[] = [
+  AUTO_REDEEMER,
+  COMBOS_POSITION_MANAGER,
+  COMBOS_EXCHANGE,
+  EXCHANGE,
+  NEG_RISK_EXCHANGE,
+  EXCHANGE_V2,
+  NEG_RISK_EXCHANGE_V2,
+  EXCHANGE_V2_THIRD,
+] as const;
 
 // ── OrderFilled: one fill -> one raw row, one position mutation ────
 //
@@ -46,6 +78,8 @@ indexer.onEvent({ contract: 'CTFExchangeV2', event: 'OrderFilled' }, async ({ ev
     logIndex: event.logIndex,
     timestamp: event.block.timestamp,
   });
+
+  if (ORDER_FILLED_NON_USER_ADDRESSES.includes(order.account.toLowerCase())) return;
 
   const mutate =
     order.side === TradeType.BUY ? updateUserPositionWithBuy : updateUserPositionWithSell;
