@@ -25,6 +25,11 @@ const CONDITIONAL_TOKENS = '0x4d97dcd97ec945f40cf65f87097ace5ea0476045' as const
 /** NegRiskAdapter. */
 const NEG_RISK_ADAPTER = '0xd91e80cf2e7be2e162c6513ced06f1dd0da35296' as const;
 
+/**
+ * Where the NegRiskAdapter parks converted NO positions.
+ */
+const NEG_RISK_ESCROW_SINK = '0xa5ef39c3d3e10d0b270233af41cac69796b12966' as const;
+
 /** Redeems on users' behalf, so it is a counterparty that never holds a
  *  position. */
 const AUTO_REDEEMER = '0xa1200000d0002264c9a1698e001292d00e1b00af' as const;
@@ -108,6 +113,8 @@ const COLLATERAL_SCALE = USDC_SCALE;
  */
 const FIFTY_CENTS = COLLATERAL_SCALE / 2n;
 
+const V2_START_BLOCK = 85_050_370;
+
 // ── Order side ─────────────────────────────────────────────────────
 
 /**
@@ -144,6 +151,7 @@ export {
   NEG_RISK_ADAPTER,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V1,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V2,
+  NEG_RISK_ESCROW_SINK,
   NEG_RISK_EXCHANGE,
   NEG_RISK_EXCHANGE_V2,
   NEG_RISK_WRAPPED_COLLATERAL,
@@ -152,4 +160,5 @@ export {
   TradeType,
   USDC,
   ZERO_ADDRESS,
+  V2_START_BLOCK,
 };
