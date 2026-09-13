@@ -19,16 +19,8 @@
  * them up to the effect's rate limit — fold into the same one.
  */
 
-import { createPublicClient, getAddress, http } from 'viem';
+import { createPublicClient, http } from 'viem';
 import { polygon } from 'viem/chains';
-
-/** Gnosis ConditionalTokens on Polygon.
- *
- * Checksummed via getAddress rather than written out: viem rejects an address
- * whose EIP-55 casing is wrong, and it rejects it at call time, deep inside an
- * effect, where the only symptom is every probe failing.
- */
-export const CONDITIONAL_TOKENS = getAddress('0x4d97dcd97ec945f40cf65f87097ace5ea0476045');
 
 export const RPC_URL = process.env.POLYGON_RPC_URL ?? 'https://polygon.gateway.tenderly.co';
 
