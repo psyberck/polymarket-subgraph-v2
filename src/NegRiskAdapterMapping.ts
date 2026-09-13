@@ -1,13 +1,12 @@
 import { indexer } from 'envio';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
-import { conditionPositionIds } from '@lib/conditions';
+import { getConditionPositionIds } from '@utils/getPositionId';
 import { computeNegRiskYesPrice, splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 import { indexSetContains } from '@utils/indexSetContains';
 import { getNegRiskPositionId } from '@utils/getNegRiskPositionId';
 import { loadUserPosition } from '@utils/loadUserPosition';
-import { ensurePayoutPrices } from '@lib/payouts';
-import { upsertCondition } from '@utils/upsertCondition';
+import { upsertCondition, upsertPayoutPrices } from '@utils/upsertCondition';
 import { getNegRiskConditionId } from '@utils/getNegRiskConditionId';
 import {
   AUTO_REDEEMER,
@@ -64,7 +63,7 @@ indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PositionSplit' },
   async ({ event, context }) => {
     const conditionId = event.params.conditionId;
-    const positionIds = await conditionPositionIds(context, conditionId);
+    const positionIds = await getConditionPositionIds(context, conditionId);
     if (!positionIds.length) return;
 
     if (NEG_RISK_LIFECYCLE_NON_OWNERS.includes(event.params.stakeholder.toLowerCase())) return;
@@ -94,7 +93,7 @@ indexer.onEvent(
     if (NEG_RISK_LIFECYCLE_NON_OWNERS.includes(event.params.stakeholder.toLowerCase())) return;
 
     const conditionId = event.params.conditionId;
-    const positionIds = await conditionPositionIds(context, conditionId);
+    const positionIds = await getConditionPositionIds(context, conditionId);
     if (!positionIds.length) return;
 
     const price = splitNegRiskPrice(positionIds.length);
@@ -222,7 +221,7 @@ indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PayoutRedemption' },
   async ({ event, context }) => {
     const conditionId = event.params.conditionId;
-    const tokenIds = await conditionPositionIds(context, conditionId);
+    const tokenIds = await getConditionPositionIds(context, conditionId);
     if (!tokenIds.length) return;
 
     const amounts = event.params.amounts;
@@ -230,7 +229,7 @@ indexer.onEvent(
 
     if (NEG_RISK_REDEEM_NON_OWNERS.includes(redeemer.toLowerCase())) return;
 
-    const prices = await ensurePayoutPrices(context, conditionId);
+    const prices = await upsertPayoutPrices(context, conditionId);
     if (!prices) return;
     if (tokenIds.length !== amounts.length) {
       context.log.warn(

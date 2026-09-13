@@ -22,12 +22,11 @@ import {
   USDC,
 } from '@utils/constants';
 import { type EvmOnEventContext, indexer } from 'envio';
-import { conditionPositionIds } from '@lib/conditions';
-import { upsertCondition } from '@utils/upsertCondition';
+import { getConditionPositionIds } from '@utils/getPositionId';
+import { upsertCondition, upsertPayoutPrices } from '@utils/upsertCondition';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
-import { ensurePayoutPrices } from '@lib/payouts';
 import { loadUserPosition } from '@utils/loadUserPosition';
 
 /** Collaterals the markets table already holds ids for; they need no
@@ -90,7 +89,7 @@ async function getCollateralTokenIds(
     return [];
   }
 
-  const ids = await conditionPositionIds(context, conditionId, collateral);
+  const ids = await getConditionPositionIds(context, conditionId, collateral);
   if (!ids.length) return [];
 
   if (!USDC_COLLATERAL.has(collateral)) {
@@ -208,7 +207,7 @@ indexer.onEvent(
     );
     if (!tokens.length) return;
     const redeemer = event.params.redeemer;
-    const prices = await ensurePayoutPrices(context, conditionId);
+    const prices = await upsertPayoutPrices(context, conditionId);
     if (!prices) {
       context.log.warn(
         `Redemption skipped, no settled prices readable: condition=${conditionId} ` +
