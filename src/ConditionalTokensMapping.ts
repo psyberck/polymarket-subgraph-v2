@@ -22,7 +22,7 @@ import {
   USDC,
 } from '@utils/constants';
 import { type EvmOnEventContext, indexer } from 'envio';
-import { getConditionPositionIds } from '@utils/getPositionId';
+import { getConditionPositionIds, getPositionId } from '@utils/getPositionId';
 import { upsertCondition, upsertPayoutPrices } from '@utils/upsertCondition';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
@@ -247,10 +247,20 @@ indexer.onEvent(
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'ConditionPreparation' },
   async ({ event, context }) => {
-    await upsertCondition(context, event.params.conditionId, {
-      outcomeSlotCount: Number(event.params.outcomeSlotCount),
-      negRisk: event.params.oracle.toLowerCase() === NEG_RISK_ADAPTER,
-    });
+    const conditionId = event.params.conditionId;
+    const outcomeSlotCount = Number(event.params.outcomeSlotCount);
+    const negRisk = event.params.oracle.toLowerCase() === NEG_RISK_ADAPTER;
+
+    await upsertCondition(context, conditionId, { outcomeSlotCount, negRisk });
+    const collateral = negRisk ? NEG_RISK_WRAPPED_COLLATERAL : USDC;
+    for (let outcomeIndex = 0; outcomeIndex < outcomeSlotCount; outcomeIndex++) {
+      context.OutcomeToken.set({
+        id: getPositionId(conditionId, outcomeIndex, negRisk).toString(),
+        conditionId,
+        outcomeIndex,
+        collateral,
+      });
+    }
   },
 );
 
