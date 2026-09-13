@@ -10,8 +10,8 @@
     "baseUrl": ".",
     "paths": {
       "@lib/*": ["src/lib/*"],
-      "@handlers/*": ["src/handlers/*"],
-      "@utils/*": ["src/utils/*"]
+      "@utils/*": ["src/utils/*"],
+      "@effects/*": ["src/effects/*"]
     }
   },
   "include": ["src/**/*.ts", "envio-env.d.ts"]
