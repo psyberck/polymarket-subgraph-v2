@@ -15,8 +15,6 @@
  * checksummed address.
  */
 
-import { USDC_SCALE } from '@lib/position';
-
 // ── Core protocol ──────────────────────────────────────────────────
 
 /** Gnosis ConditionalTokens — the live CTF. */
@@ -102,7 +100,7 @@ const NEG_RISK_CTF_COLLATERAL_ADAPTER_V2 = '0xada2005600dec949baf300f4c6120000bd
  * every amount and price in this indexer is denominated in. The subgraph built
  * the same value as `BigInt.fromI32(10).pow(6)`.
  */
-const COLLATERAL_SCALE = USDC_SCALE;
+const COLLATERAL_SCALE = 1_000_000n;
 
 /**
  * Half of one unit of collateral, 1e6.
