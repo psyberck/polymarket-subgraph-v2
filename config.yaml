@@ -20,7 +20,7 @@ contracts:
 
   # ── Position lifecycle: standard markets ───────────────────────────
   # Splits and merges move token balances without a trade; redemptions
-  # realize PnL at resolution. All three must be folded in or cost basis
+  # realize PnL at byResolution. All three must be folded in or cost basis
   # drifts from Polymarket's own accounting.
   #
   # These land on the Gnosis ConditionalTokens contract, NOT on Polymarket's
@@ -31,6 +31,7 @@ contracts:
   # same handler picks them up with no code change.
   - name: ConditionalTokens
     events:
+      - event: 'ConditionPreparation(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount)'
       # Resolution payouts. Redemptions are priced from these per-outcome
       # numerators instead of the redemption's aggregate `payout`, which cannot
       # tell a winning leg from a losing one when a wallet holds both. Same
@@ -70,6 +71,8 @@ contracts:
       - event: 'PositionsMerge(address indexed stakeholder, bytes32 indexed conditionId, uint256 amount)'
       - event: 'PayoutRedemption(address indexed redeemer, bytes32 indexed conditionId, uint256[] amounts, uint256 payout)'
       - event: 'PositionsConverted(address indexed stakeholder, bytes32 indexed marketId, uint256 indexed indexSet, uint256 amount)'
+      - event: 'MarketPrepared(bytes32 indexed marketId, address indexed oracle, uint256 feeBips, bytes data)'
+      - event: 'QuestionPrepared(bytes32 indexed marketId, bytes32 indexed questionId, uint256 index, bytes data)'
 
 # ── Required runtime tuning ────────────────────────────────────────
 #
@@ -113,10 +116,31 @@ chains:
     # For the full v2 dataset the scoring pipeline needs, use 86126978 (the v2
     # cutover) or 84902320 (PolyUSD deployment) instead — ~6.3M and ~7.5M
     # blocks, on the order of two weeks each on this endpoint.
-    start_block: 92252943
-    # No end_block: follow the chain to head. The bounded validation window
-    # (end_block 86236978) is what the comment above describes; it was removed
-    # once the fold was verified against it. Restore it to re-run that window.
+    # ── ONE-WEEK BOUNDED RUN (2026-09-07) ────────────────────────────
+    # Exactly 7.0000 days, both bounds pinned by block timestamp rather than by
+    # an assumed block time -- Polygon is at 1.500 s/block here, so a week is
+    # 403,196 blocks and the 302,400 a 2 s assumption would give lands ~28 h
+    # short.
+    #
+    #   92970377   2026-08-31T07:16:33Z
+    #   93373573   2026-09-07T07:16:33Z
+    #
+    # start_block stays pinned so the comparable set is well defined: positions
+    # opened before it carry unknown opening balances, so reconcile.py and
+    # sweep_reconcile.py must both be given --start-block 92970377 -- see
+    # reconcile.py's docstring on why absolute values cannot agree otherwise.
+    start_block: 92970377
+    # end_block REMOVED 2026-09-08 to follow the chain to head.
+    #
+    # A pinned end_block makes the Data API comparison meaningless: the API
+    # reports CURRENT lifetime state with no point-in-time query, so once the
+    # window closes every position that keeps trading diverges for reasons that
+    # are not bugs. Measured on the 93,373,573 run -- read ~20 h after it closed,
+    # 98.5% of the 19,463 "size" divergences were our value matching the on-chain
+    # balance at end_block exactly, i.e. entirely time skew.
+    #
+    # Restore a pinned end_block only for a reproducible re-index, never for a
+    # run that will be reconciled against the API.
     #
     # ~6.3M blocks from the v2 cutover to head. At the ~340 blk/min this
     # endpoint sustains that is on the order of two weeks — the limit is RPC
