@@ -19,7 +19,6 @@ import {
 import { negRiskEventSize } from '@utils/negrisk-utils';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
-import { upsertPayoutPrices } from '@utils/upsertCondition';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 
 const V2_ADAPTERS = [
@@ -94,7 +93,7 @@ async function mutate(
       await updateUserPositionWithBuy(context, event, wallet, tokenId, price, value, conditionId);
     } else {
       const settled = token
-        ? (await upsertPayoutPrices(context, token.conditionId))?.[token.outcomeIndex]
+        ? (await context.Condition.get(token.conditionId))?.payoutPrices?.[token.outcomeIndex]
         : undefined;
 
       const settledPrice = settled ?? (await getPrice(context, conditionId));

@@ -1,5 +1,4 @@
 import type { Condition, EvmOnEventContext } from 'envio';
-import { outcomePayoutPriceEffect } from '@effects/outcomePayoutEffect';
 
 /** Fields a writer may set on a condition; anything omitted is left alone. */
 type ConditionRec = {
@@ -58,34 +57,5 @@ const upsertCondition = async (
   return condition;
 };
 
-/**
- * Settled prices for a condition, by outcome index — read the row, else probe
- * once and persist.
- *
- * `null` means unknown or not yet settled, which callers read as "use merge
- * pricing". One entity read answers it: the prices sit on the `Condition` row
- * beside the outcome count, so a surrender batch costs one get per token rather
- * than one per outcome.
- *
- * @param context - Handler context; the row is read and written through it.
- * @param conditionId - 0x-prefixed 32-byte condition id.
- * @returns Settled price per outcome, 1e6, or null when there is none.
- */
-const upsertPayoutPrices = async (
-  context: EvmOnEventContext,
-  conditionId: string,
-): Promise<readonly bigint[] | null> => {
-  const condition = await context.Condition.get(conditionId);
-  if (!condition) return null;
-
-  if (condition.payoutPrices?.length) return condition.payoutPrices;
-
-  const prices = await context.effect(outcomePayoutPriceEffect, conditionId);
-  if (!prices?.length) return null;
-
-  await upsertCondition(context, conditionId, { payoutPrices: prices });
-  return prices;
-};
-
-export { upsertCondition, upsertPayoutPrices };
+export { upsertCondition };
 export type { ConditionRec };

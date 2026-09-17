@@ -23,7 +23,7 @@ import {
 } from '@utils/constants';
 import { type EvmOnEventContext, indexer } from 'envio';
 import { getConditionPositionIds, getPositionId } from '@utils/getPositionId';
-import { upsertCondition, upsertPayoutPrices } from '@utils/upsertCondition';
+import { upsertCondition } from '@utils/upsertCondition';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
@@ -207,8 +207,8 @@ indexer.onEvent(
     );
     if (!tokens.length) return;
     const redeemer = event.params.redeemer;
-    const prices = await upsertPayoutPrices(context, conditionId);
-    if (!prices) {
+    const prices = (await context.Condition.get(conditionId))?.payoutPrices;
+    if (!prices?.length) {
       context.log.warn(
         `Redemption skipped, no settled prices readable: condition=${conditionId} ` +
           `redeemer=${redeemer} block=${event.block.number}`,

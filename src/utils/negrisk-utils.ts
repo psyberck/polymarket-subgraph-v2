@@ -1,24 +1,33 @@
 import type { EvmOnEventContext } from 'envio';
-import { negRiskEventCountEffect } from '@effects/negRiskQuestionEffect';
 
+/**
+ * Questions in the neg-risk event a condition belongs to.
+ *
+ * A PURE READ -- row presence is the gate. MarketPrepared and QuestionPrepared
+ * maintain the count in-window; seed_conditions.ts --phase negrisk supplies it
+ * for events prepared before start_block. Do not add a probe back:
+ * questionCount GROWS, so a chain read answers as of the tip and misprices
+ * every earlier block.
+ *
+ * @param context - Handler context; both entity rows are read through it, so
+ *   this must be awaited inside a handler.
+ * @param conditionId - 0x-prefixed 32-byte condition id.
+ * @returns The event's question count, or `null` -- which means UNKNOWN, NEVER
+ *   "not neg-risk". Callers must keep those apart: a standalone condition and a
+ *   neg-risk event of unknown size both answer null, and collapsing them prices
+ *   an 11-question leg at 1/2 instead of 1/11, a 5.5x cost-basis error. That is
+ *   why AdapterTransfers refuses to price on null rather than falling through.
+ */
 const negRiskEventSize = async (
   context: EvmOnEventContext,
   conditionId: string,
 ): Promise<number | null> => {
   const condition = await context.Condition.get(conditionId);
   const marketId = condition?.negRiskMarketId;
-  if (marketId) {
-    const key = marketId.toLowerCase();
-    const event = await context.NegRiskEvent.get(key);
-    if (event) return event.questionCount || null;
+  if (!marketId) return null;
 
-    const cnt = await context.effect(negRiskEventCountEffect, key);
-    if (!cnt) return null;
-
-    context.NegRiskEvent.set({ id: key, questionCount: cnt });
-    return cnt;
-  }
-  return null;
+  const event = await context.NegRiskEvent.get(marketId.toLowerCase());
+  return event?.questionCount || null;
 };
 
 export { negRiskEventSize };

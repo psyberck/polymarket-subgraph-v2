@@ -71,8 +71,16 @@ function toWord(value: bigint): string {
  * This is the CTF primitive — `getCollectionId(0x0, conditionId, indexSet)`.
  * An index set is a bitmask of outcomes, so one outcome is the singleton
  * `1 << outcomeIndex`, which `computeCollectionId` wraps. Sets with more than
- * one bit are legitimate collections, and the raw form is exposed because
- * scripts/ctf_parity.ts needs it to identify ids built under other conventions.
+ * one bit are legitimate collections, and the raw form is exposed so
+ * scripts/token_parity.ts can identify ids built from a WRONG index set.
+ *
+ * It needs that because Gamma publishes 95 such ids: for the 39 non-binary
+ * markets it derives `clob_token_id` with the index set as a 1-based counter
+ * rather than a bitmask, so its "outcome 2" id is really the collection
+ * {outcome0, outcome1}. Being able to name the set behind an id is what turns
+ * "this id does not match" into "Gamma used indexSet 3 where the outcome's own
+ * set is 4". The protocol only ever splits one-hot, so those collections have
+ * no supply and the ids are unreachable -- see token_parity.ts.
  *
  * `keccak256(conditionId ‖ indexSet)` is treated as a candidate x-coordinate
  * and incremented until it lands on the curve, which is what the CTF does to

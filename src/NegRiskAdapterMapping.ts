@@ -6,7 +6,7 @@ import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 import { indexSetContains } from '@utils/indexSetContains';
 import { getNegRiskPositionId } from '@utils/getNegRiskPositionId';
 import { loadUserPosition } from '@utils/loadUserPosition';
-import { upsertCondition, upsertPayoutPrices } from '@utils/upsertCondition';
+import { upsertCondition } from '@utils/upsertCondition';
 import { getNegRiskConditionId } from '@utils/getNegRiskConditionId';
 import {
   AUTO_REDEEMER,
@@ -229,8 +229,8 @@ indexer.onEvent(
 
     if (NEG_RISK_REDEEM_NON_OWNERS.includes(redeemer.toLowerCase())) return;
 
-    const prices = await upsertPayoutPrices(context, conditionId);
-    if (!prices) return;
+    const prices = (await context.Condition.get(conditionId))?.payoutPrices;
+    if (!prices?.length) return;
     if (tokenIds.length !== amounts.length) {
       context.log.warn(
         `Neg-risk redemption outcome mismatch: condition=${conditionId} ` +
