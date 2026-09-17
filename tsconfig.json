@@ -9,9 +9,7 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@lib/*": ["src/lib/*"],
-      "@utils/*": ["src/utils/*"],
-      "@effects/*": ["src/effects/*"]
+      "@utils/*": ["src/utils/*"]
     }
   },
   "include": ["src/**/*.ts", "envio-env.d.ts"]
