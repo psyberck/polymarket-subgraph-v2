@@ -23,9 +23,7 @@ import { parse as parseYaml } from 'yaml';
 import { createPublicClient, http, parseAbi } from 'viem';
 import { polygon } from 'viem/chains';
 
-const GAMMA = 'https://gamma-api.polymarket.com/events/keyset';
-const GAMMA_EVENTS = 'https://gamma-api.polymarket.com/events';
-
+const GAMMA = 'https://gamma-api.polymarket.com/events';
 const OUT_DIR = 'logs/markets';
 const META_FILE = `${OUT_DIR}/meta.json`;
 const RAW = `${OUT_DIR}/markets.jsonl`;
@@ -54,41 +52,29 @@ const PHASE: string = (() => {
 })();
 
 const RPS = 50;
-/** Events per page on the happy path. */
 const PAGE_SIZE = 100;
-/** Consecutive failures on the keyset walk before handing off to stage 2. */
-const DEGRADE_AFTER = 5;
-/**
- * Event ids per stage-2 request. 100 is the ceiling -- 150 and above return
- * 422. `limit` must be sent too: its default is 20, so 100 ids without it
- * silently yields 20 events and reads as sparse ids rather than truncation.
- */
-const ID_BATCH = 100;
-/** Failures on one id batch before halving it. */
-const FILL_DEGRADE_AFTER = 5;
-/** Passes over the tail, to pick up events created while fetching. */
-const FILL_MAX_ROUNDS = 5;
+const WORKERS = 10;
+const MAXIMUM_RETRY = 10;
+const EMPTY_WAVES_TO_TERMINATE = 10;
+
 // ──────────────────────────────────── Progress ───────────────────────────────────────────────────
 
 interface Progress {
-  cursor: string | null;
-  completed: boolean;
+  eventId: number | null;
   pages: number;
   events: number;
   markets: number;
-  errors: number;
   updated_at: string;
-  marketId?: number;
+  completed: boolean;
 }
 
 const initialProgress = (): Progress => ({
-  cursor: null,
-  completed: false,
+  eventId: null,
   pages: 0,
   events: 0,
   markets: 0,
-  errors: 0,
   updated_at: new Date().toISOString(),
+  completed: false,
 });
 
 const getProgress = (): Progress =>
@@ -128,224 +114,124 @@ const jsonLine = (v: unknown): string =>
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
 
+const getMaxEventId = (evs: GammaEvent[]): number =>
+  evs.reduce((hi, e) => {
+    const n = Number(e.id);
+    return Number.isInteger(n) && n > hi ? n : hi;
+  }, 0);
+
+interface GammaEvent {
+  id: string;
+  markets: unknown[];
+}
+
+interface MarketQueryParams {
+  startBlockId?: number;
+  endBlockId?: number;
+  pageSize: number;
+}
+
 async function fetchMarkets(): Promise<void> {
+  let slot = 0;
+
+  const getEventsByIds = async (params: MarketQueryParams): Promise<GammaEvent[]> => {
+    let reason = '';
+    const url = new URL(GAMMA);
+    url.searchParams.set('limit', String(params.pageSize));
+    url.searchParams.set('order', 'id');
+    url.searchParams.set('ascending', 'true');
+    if (params.startBlockId !== undefined && params.endBlockId !== undefined) {
+      for (let id = params.startBlockId; id <= params.endBlockId; id++)
+        url.searchParams.append('id', String(id));
+    }
+
+    for (let attempt = 1; attempt <= MAXIMUM_RETRY; attempt++) {
+      const now = Date.now();
+      const at = Math.max(now, slot);
+      slot = at + 1000 / RPS;
+      if (at > now) await new Promise((r) => setTimeout(r, at - now));
+
+      try {
+        const res = await fetch(url);
+        if (res.ok) return (await res.json()) as GammaEvent[];
+        reason = `HTTP ${res.status}: ${await res.text()}`;
+      } catch (e) {
+        reason = e instanceof Error ? e.message : String(e);
+      }
+
+      if (attempt < MAXIMUM_RETRY) {
+        await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), 5_000)));
+      }
+    }
+    throw new Error(
+      `ids ${params?.startBlockId}-${params?.endBlockId}: ${MAXIMUM_RETRY} attempts reached: ${reason}`,
+    );
+  };
+
   mkdirSync(OUT_DIR, { recursive: true });
   const p = getProgress();
-  const gap = 1000 / RPS;
+  p.completed = false;
+  let waves = 0;
 
-  let attempt = 0;
-  const size = PAGE_SIZE;
+  let nextId = 0;
+  let none = 0;
 
   for (;;) {
-    const url = new URL(GAMMA);
-    url.searchParams.set('limit', size.toString());
-    if (p.cursor) url.searchParams.set('after_cursor', p.cursor);
+    let evs: GammaEvent[];
 
-    const t0 = Date.now();
-    const res = await fetch(url);
-    if (!res.ok) {
-      p.errors++;
-      attempt++;
-      const wait = Math.min(250 * 2 ** (attempt - 1), 2_000);
-      console.warn(`  HTTP ${res.status} at page ${p.pages}, attempt ${attempt}; ${wait}ms`);
-      if (attempt < DEGRADE_AFTER) {
-        // Must actually wait -- retrying immediately only hammers an endpoint
-        // that is already failing.
-        await new Promise((r) => setTimeout(r, wait));
-        continue;
+    let currMaxEventId: number;
+
+    if (!p.eventId) {
+      evs = await getEventsByIds({ pageSize: PAGE_SIZE });
+      p.pages += 1;
+      currMaxEventId = getMaxEventId(evs);
+      if (!currMaxEventId)
+        throw new Error('first page returned no events — cannot find a start id');
+      console.log(`  first page ends at id ${currMaxEventId.toLocaleString()}`);
+    } else {
+      const items: MarketQueryParams[] = [];
+      for (let i = p.eventId; items.length < WORKERS; i += PAGE_SIZE) {
+        items.push({ startBlockId: i, endBlockId: i + PAGE_SIZE - 1, pageSize: PAGE_SIZE });
       }
-      // Out of retries: leave the walk and finish by id. Breaking matters --
-      // dropping through would run res.json() on an error response, read the
-      // error body as an empty event list, and book nothing while the cursor
-      // and counters still looked healthy.
-      console.warn(`  ${attempt} consecutive failures — handing off to the id route`);
-      break;
+      evs = (await Promise.all(items.map((item) => getEventsByIds(item)))).flat();
+      p.pages += items.length;
+      currMaxEventId = p.eventId + items.length * PAGE_SIZE - 1;
     }
-    attempt = 0;
 
-    const body = (await res.json()) as {
-      events?: { markets?: unknown[] }[];
-      next_cursor?: string;
-    };
-    const evs = body.events ?? [];
-    const nextCursor = body.next_cursor;
     const markets = evs.flatMap((e) => e.markets ?? []);
     if (markets.length) {
       appendFileSync(RAW, markets.map((m) => jsonLine(m)).join('\n') + '\n');
     }
-    p.pages++;
+
+    nextId = Math.max(nextId, getMaxEventId(evs));
+    p.eventId = currMaxEventId + 1;
     p.events += evs.length;
     p.markets += markets.length;
-    if (nextCursor) {
-      p.cursor = nextCursor;
-    }
-
     saveProgress(p);
-    if (p.pages % 50 === 0) {
+
+    if (evs.length === 0) {
+      if (++none >= EMPTY_WAVES_TO_TERMINATE) {
+        p.eventId = nextId + 1;
+        saveProgress(p);
+        break;
+      }
+    } else {
+      none = 0;
+    }
+
+    if (++waves % 20 === 0) {
       console.log(
-        `  pages=${p.pages}  events=${p.events.toLocaleString()}  ` +
-          `markets=${p.markets.toLocaleString()}  500s=${p.errors.toLocaleString()}`,
+        `  id ${currMaxEventId.toLocaleString()}  events=${p.events.toLocaleString()} ` +
+          `markets=${p.markets.toLocaleString()}`,
       );
-    }
-
-    if (!nextCursor || evs.length < size) {
-      p.completed = true;
-      saveProgress(p);
-      console.log(
-        `  DONE  pages=${p.pages}  events=${p.events.toLocaleString()}  ` +
-          `markets=${p.markets.toLocaleString()}  500s=${p.errors.toLocaleString()}`,
-      );
-      return;
-    }
-    const w = gap - (Date.now() - t0);
-    if (w > 0) await new Promise((r) => setTimeout(r, w));
-  }
-
-  // ── stage 2: by event id ────────────────────────────────────────
-  //
-  // Reached ONLY by the break above -- a completed walk returns from inside the
-  // loop. The keyset walk is the primary mechanism and is retried from its
-  // cursor on every run; this finishes the corpus when it cannot proceed.
-  //
-  // The handoff is gap-free because keyset order IS id order: pages are
-  // contiguous ascending ranges and no event exists below the walk's first id
-  // (2890), so the walk covering [2890, cursorId] and this covering
-  // [cursorId + 1, newest] leaves nothing out.
-  //
-  // One-way within a run: cursors are HMAC-signed, so one cannot be built for a
-  // position the walk never reached, and there is no rejoining it.
-
-  // Whichever frontier is further along wins. The keyset walk is retried from
-  // its cursor on every run, so after one handoff the two disagree: the cursor
-  // is parked where the walk stalled, while marketId is wherever the id route
-  // reached. Taking the cursor alone would re-fetch by id everything the id
-  // route already has.
-  let next = Math.max(p.marketId ?? 0, cursorEventId(p.cursor) + 1);
-  if (!Number.isInteger(next) || next < 1) throw new Error(`cannot resolve a start id`);
-
-  // Per-run only: the durable record of which ids were skipped is the file.
-  let skipped = 0;
-  console.log(`  filling from event id ${next.toLocaleString()}`);
-
-  for (let round = 1; round <= FILL_MAX_ROUNDS; round++) {
-    const newest = await newestEventId();
-    if (next > newest) {
-      console.log(`  round ${round}: nothing past ${newest.toLocaleString()} — done`);
-      break;
-    }
-    console.log(
-      `  round ${round}: ${next.toLocaleString()} -> ${newest.toLocaleString()} ` +
-        `(${Math.ceil((newest - next + 1) / ID_BATCH).toLocaleString()} requests)`,
-    );
-
-    let batch = ID_BATCH;
-    let attempt = 0;
-    while (next <= newest) {
-      const hi = Math.min(next + batch - 1, newest);
-      const url = new URL(GAMMA_EVENTS);
-      url.searchParams.set('limit', String(ID_BATCH));
-      for (let id = next; id <= hi; id++) url.searchParams.append('id', String(id));
-
-      const t0 = Date.now();
-      const res = await fetch(url);
-      if (!res.ok) {
-        p.errors++;
-        attempt++;
-        if (attempt >= FILL_DEGRADE_AFTER) {
-          if (batch > 1) {
-            // Halve rather than crawl straight away: a bad id poisons only the
-            // batch containing it, so bisecting isolates it in log2 steps.
-            batch = Math.max(1, Math.floor(batch / 2));
-            console.warn(`  HTTP ${res.status} at id ${next} — batch -> ${batch}`);
-          } else {
-            // One id, still failing. Skipping is the only way forward, so it is
-            // recorded: a silent skip would leave a hole nothing could find.
-            appendFileSync(`${OUT_DIR}/fill_skipped.txt`, `${next}\n`);
-            skipped++;
-            console.warn(`  SKIPPING id ${next} after ${attempt} failures`);
-            next++;
-            p.marketId = next;
-            saveProgress(p);
-            batch = ID_BATCH;
-          }
-          attempt = 0;
-          continue;
-        }
-        await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), 8_000)));
-        continue;
-      }
-      attempt = 0;
-
-      const evs = (await res.json()) as { markets?: unknown[] }[];
-      const markets = evs.flatMap((e) => e.markets ?? []);
-      if (markets.length) {
-        appendFileSync(RAW, markets.map((m) => jsonLine(m)).join('\n') + '\n');
-      }
-      p.events += evs.length;
-      p.markets += markets.length;
-      next = hi + 1;
-      p.marketId = next;
-      saveProgress(p);
-      if (batch < ID_BATCH) batch = ID_BATCH; // recovered
-
-      if (p.events % 5_000 < evs.length) {
-        console.log(
-          `    id ${next.toLocaleString()}  events=${p.events.toLocaleString()}  ` +
-            `markets=${p.markets.toLocaleString()}  errors=${p.errors.toLocaleString()}`,
-        );
-      }
-      const w = gap - (Date.now() - t0);
-      if (w > 0) await new Promise((r) => setTimeout(r, w));
     }
   }
 
-  saveProgress(p);
-  console.log(
-    `\n  FILLED  events=${p.events.toLocaleString()}  ` +
-      `markets=${p.markets.toLocaleString()}  ` +
-      `errors=${p.errors.toLocaleString()}  skipped=${skipped.toLocaleString()}`,
-  );
-  if (skipped) console.log(`  skipped ids -> ${OUT_DIR}/fill_skipped.txt`);
-  // This is the end of the fetch, whichever mechanism got here.
   p.completed = true;
   saveProgress(p);
-}
-
-/**
- * The event id a keyset cursor is parked on.
- *
- * The cursor is 32 signature bytes followed by JSON --
- * `{"v":1,"k":"events","oh":"<hash>","keys":[{"t":"string","v":"740448"}]}`.
- * That layout is UNDOCUMENTED and read here only to tell the id route where
- * the keyset walk stopped. It is signed, so it cannot be forged to skip
- * ahead; this only reads it. If the format changes this throws rather than
- * guessing, and `--from-id` overrides it.
- *
- * @param cursor - `after_cursor` value from a keyset response, or null.
- * @returns The last consumed event id.
- */
-function cursorEventId(cursor: string | null): number {
-  if (!cursor) throw new Error('no cursor in meta.json — pass --from-id');
-  const raw = Buffer.from(cursor, 'base64url');
-  const payload = JSON.parse(raw.subarray(32).toString('utf8')) as {
-    keys?: { v?: string }[];
-  };
-  const v = payload.keys?.[0]?.v;
-  const n = Number(v);
-  if (!v || !Number.isInteger(n)) {
-    throw new Error(`cannot read an event id from the cursor — pass --from-id`);
-  }
-  return n;
-}
-
-/** Highest event id Gamma currently has. */
-async function newestEventId(): Promise<number> {
-  const res = await fetch(`${GAMMA_EVENTS}?limit=1&order=id&ascending=false`);
-  if (!res.ok) throw new Error(`newest-id probe: HTTP ${res.status}`);
-  const body = (await res.json()) as { id?: string }[];
-  const n = Number(body[0]?.id);
-  if (!Number.isInteger(n)) throw new Error('newest-id probe returned no id');
-  return n;
+  console.log(
+    `\n  DONE  events=${p.events.toLocaleString()} markets=${p.markets.toLocaleString()}`,
+  );
 }
 
 const jsonArray = (v: unknown): string[] => {
