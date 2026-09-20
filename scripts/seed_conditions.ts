@@ -68,6 +68,17 @@ interface Progress {
   completed: boolean;
 }
 
+interface GammaEvent {
+  id: string;
+  markets: unknown[];
+}
+
+interface MarketQueryParams {
+  startBlockId?: number;
+  endBlockId?: number;
+  pageSize: number;
+}
+
 const initialProgress = (): Progress => ({
   eventId: null,
   pages: 0,
@@ -120,20 +131,37 @@ const getMaxEventId = (evs: GammaEvent[]): number =>
     return Number.isInteger(n) && n > hi ? n : hi;
   }, 0);
 
-interface GammaEvent {
-  id: string;
-  markets: unknown[];
-}
-
-interface MarketQueryParams {
-  startBlockId?: number;
-  endBlockId?: number;
-  pageSize: number;
-}
-
+/**
+ * The Gamma event corpus, appended to markets.jsonl.
+ *
+ * Walks BY EVENT ID, not by cursor. `/events/keyset` serves some id regions at
+ * a fixed ~2.2 s regardless of page size, which is its timeout: limit=1 lands
+ * under it, limit>=2 always 500s, and retrying never gets through. Ids have no
+ * such region, need no cursor, and parallelise -- a wave is WORKERS batches of
+ * PAGE_SIZE ids issued together, and the id is itself the resume point.
+ *
+ * Ids are SPARSE: 96.2% density over ids 2,800-260,000, with one run of 3,400
+ * absent in a row. So a short response is normal and says nothing about the
+ * end; only EMPTY_WAVES_TO_TERMINATE consecutive empty waves does.
+ *
+ * @returns Nothing. Markets are appended to RAW, progress written to META_FILE
+ *   after each wave, and `completed` set once the walk passes the last event.
+ */
 async function fetchMarkets(): Promise<void> {
+  // Shared pacer: every request, retries included, takes the next 1000/RPS slot.
   let slot = 0;
 
+  /**
+   * One request's events, retried with a backoff ladder.
+   *
+   * @param params - ids to ask for. A bare `pageSize` with no range means the
+   *   first page by id ascending, which is how a fresh walk learns where events
+   *   begin instead of assuming a floor.
+   * @returns The raw events -- NOT their markets. The caller flattens; it needs
+   *   the ids to know how far the walk actually got.
+   * @throws After MAXIMUM_RETRY attempts. Aborts the run: progress is saved per
+   *   wave, so a restart resumes, but a permanently bad range cannot be passed.
+   */
   const getEventsByIds = async (params: MarketQueryParams): Promise<GammaEvent[]> => {
     let reason = '';
     const url = new URL(GAMMA);
