@@ -54,7 +54,6 @@ export interface SinkStats {
   deferred: number;
   idMismatch: number;
   chainPriced: number;
-  negCounted: number;
   conditions: number;
 }
 
@@ -77,7 +76,6 @@ export const createSinkStats = (): SinkStats => ({
   deferred: 0,
   idMismatch: 0,
   chainPriced: 0,
-  negCounted: 0,
   conditions: 0,
 });
 
