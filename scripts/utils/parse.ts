@@ -1,6 +1,6 @@
-import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '@utils/constants.ts';
-import { computePositionId } from '@utils/ctf-utils.ts';
-import { pool } from './postgres.ts';
+import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '@utils/constants';
+import { computePositionId } from '@utils/ctf-utils';
+import { pool } from './postgres';
 
 /**
  * Batch size
@@ -153,7 +153,7 @@ export function settledPrices(raw: string[]): bigint[] | null {
  * `$(k * cols.length + c + 1)`, so a short row shifts every later tuple onto the
  * wrong parameters.
  *
- * No ON CONFLICT, so a duplicate id aborts the load. The TRUNCATE in
+ * No ON CONFLICT by default, so a duplicate id aborts the load. The TRUNCATE in
  * rebuildFromFile covers rows already in the table, but NOT duplicate lines in
  * the corpus: fetch appends before it saves progress, so a crash mid-wave leaves
  * lines the resume point does not know about and the next run re-appends them.
@@ -165,11 +165,13 @@ export function settledPrices(raw: string[]): bigint[] | null {
  *
  * @param table - destination table, which must be empty.
  * @param cols - column order; `write` supplies one value per entry, in order.
+ *   With `onConflict`, the first column must be the conflict key.
+ * @param onConflict - e.g. `ON CONFLICT ("id") DO NOTHING`; omit to keep
+ *   duplicates fatal.
  * @returns A handle to `write` rows into, `flush`, and `close` when done.
  */
-export function insertHandler(table: string, cols: string[]): Inserter {
+export function insertHandler(table: string, cols: string[], onConflict?: string): Inserter {
   const names = cols.map((c) => `"${c}"`).join(', ');
-  const head = `INSERT INTO "${table}" (${names}) VALUES `;
   const limit = Math.min(INSERT_BATCH, Math.floor(65_000 / cols.length));
   let rows: Val[][] = [];
 
@@ -185,7 +187,10 @@ export function insertHandler(table: string, cols: string[]): Inserter {
     const tuples = batch.map(
       (r, k) => `(${r.map((_, c) => `$${k * cols.length + c + 1}`).join(',')})`,
     );
-    await pool.query(head + tuples.join(','), batch.flat());
+    await pool.query(
+      `INSERT INTO "${table}" (${names}) VALUES ${tuples.join(',')} ${onConflict ? ` ${onConflict}` : ''}`,
+      batch.flat(),
+    );
   };
 
   const close = async (): Promise<void> => {
