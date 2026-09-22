@@ -20,7 +20,7 @@ interface Progress {
   pages: number;
   events: number;
   markets: number;
-  updated_at: string;
+  updatedAt: string;
   completed: boolean;
 }
 
@@ -46,7 +46,7 @@ const initialProgress = (): Progress => ({
   pages: 0,
   events: 0,
   markets: 0,
-  updated_at: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
   completed: false,
 });
 
@@ -67,10 +67,10 @@ const getProgress = (): Progress =>
  * losing them. Duplicate lines are the safer failure -- but see the note on
  * insertHandler in init_conditions.ts, which has no ON CONFLICT to absorb them.
  *
- * @param p - the progress to persist; its `updated_at` is set here.
+ * @param p - the progress to persist; its `updatedAt` is set here.
  */
 const saveProgress = (p: Progress) => {
-  p.updated_at = new Date().toISOString();
+  p.updatedAt = new Date().toISOString();
   writeFileSync(META_FILE, JSON.stringify(p, null, 2));
 };
 
