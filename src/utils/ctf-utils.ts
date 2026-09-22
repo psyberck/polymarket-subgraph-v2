@@ -29,35 +29,40 @@ const P = 2188824287183927522224640574525727508869631115729782366268903789464522
 const B = 3n;
 
 /**
- * `base ** exponent mod P`, by binary expansion of the exponent.
+ * Whether `a` is a quadratic residue mod P — an x for which the curve has a y.
  *
- * Square-and-multiply rather than anything cleverer: the exponent here is a
- * fixed 254-bit constant, so this is ~254 modular squarings per call and there
- * is no input-dependent path worth optimising.
- */
-function powModP(base: bigint, exponent: bigint): bigint {
-  let result = 1n;
-  let b = base % P;
-  let e = exponent;
-
-  while (e > 0n) {
-    if (e & 1n) result = (result * b) % P;
-    b = (b * b) % P;
-    e >>= 1n;
-  }
-
-  return result;
-}
-
-/**
- * Euler's criterion: `a ** ((P-1)/2) mod P`.
+ * Legendre's encoding: `1n` residue, `P - 1n` non-residue, `0n` only for zero.
  *
- * Returns `1n` when `a` is a non-zero quadratic residue mod P — i.e. a square,
- * i.e. an x for which the curve has a y. Returns `P - 1n` when it is not, and
- * `0n` only for `a === 0n`.
+ * By QUADRATIC RECIPROCITY: a GCD-shaped loop with shrinking operands
+ *
+ * Exact ONLY because P is prime: Jacobi equals Legendre for prime modules, and
+ * silently does not otherwise.
  */
 function legendreSymbol(a: bigint): bigint {
-  return powModP(a, (P - 1n) >> 1n);
+  let n = a % P;
+  if (n < 0n) n += P;
+  if (n === 0n) return 0n;
+
+  let m = P;
+  let sign = 1;
+
+  while (n !== 0n) {
+    while ((n & 1n) === 0n) {
+      n >>= 1n;
+      const r = m & 7n;
+      if (r === 3n || r === 5n) sign = -sign;
+    }
+
+    const swap = n;
+    n = m;
+    m = swap;
+    if ((n & 3n) === 3n && (m & 3n) === 3n) sign = -sign;
+
+    n %= m;
+  }
+
+  if (m !== 1n) return 0n;
+  return sign === 1 ? 1n : P - 1n;
 }
 
 /** Left-pad a bigint to a bare 32-byte hex string, no `0x`. */
