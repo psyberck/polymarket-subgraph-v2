@@ -335,11 +335,16 @@ async function updatePayoutPrices(
  * Reads are issued together so viem's multicall can fold them; awaiting one at a
  * time would batch nothing.
  *
+ * Pinned to startBlock - 1, like updatePayoutPrices: a question prepared inside
+ * the indexed window is the indexer's to count, and reading `latest` would make
+ * the seed depend on when it ran.
+ *
+ * @param startBlock - chain reads are pinned below it.
  * @param marketIds - markets to read; not mutated, the caller drains.
  * @returns Rows written. Ids whose count reads 0 or fails are skipped, so this
  *   is below the number attempted rather than equal to it.
  */
-async function updateNegRisk(marketIds: readonly string[]): Promise<number> {
+async function updateNegRisk(startBlock: bigint, marketIds: readonly string[]): Promise<number> {
   if (!marketIds.length) return 0;
   const markets = marketIds;
   const counts = await Promise.all(
@@ -350,6 +355,7 @@ async function updateNegRisk(marketIds: readonly string[]): Promise<number> {
           abi: NEG_RISK_ABI,
           functionName: 'getQuestionCount',
           args: [id as `0x${string}`],
+          blockNumber: startBlock - 1n,
         })
         .then((n) => Number(n))
         .catch(() => null),
@@ -538,7 +544,10 @@ async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<numb
       );
     }
     if (negMarketIds.length >= NEGRISK_FLUSH_SIZE) {
-      stats.negCounted += await updateNegRisk(negMarketIds.splice(0, negMarketIds.length));
+      stats.negCounted += await updateNegRisk(
+        startBlock,
+        negMarketIds.splice(0, negMarketIds.length),
+      );
     }
 
     if (stats.lines % 500_000 === 0) {
@@ -554,7 +563,7 @@ async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<numb
     startBlock,
     conditionIds.splice(0, conditionIds.length),
   );
-  stats.negCounted += await updateNegRisk(negMarketIds.splice(0, negMarketIds.length));
+  stats.negCounted += await updateNegRisk(startBlock, negMarketIds.splice(0, negMarketIds.length));
 
   await condOut.close();
   await tokOut.close();
