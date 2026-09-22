@@ -1,15 +1,11 @@
 import {
   appendFileSync,
   createReadStream,
-  createWriteStream,
   existsSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
 } from 'node:fs';
-import { once } from 'node:events';
-import { execFile, spawn } from 'node:child_process';
-import { promisify } from 'node:util';
 import { createInterface } from 'node:readline';
 import {
   COLLATERAL_SCALE,
@@ -19,6 +15,7 @@ import {
   USDC,
 } from '@utils/constants';
 import { getPositionId } from '@utils/getPositionId';
+import { Pool } from 'pg';
 import { parse as parseYaml } from 'yaml';
 import { createPublicClient, http, parseAbi } from 'viem';
 import { polygon } from 'viem/chains';
@@ -79,6 +76,12 @@ interface MarketQueryParams {
   pageSize: number;
 }
 
+/**
+ * A walk that has not started.
+ *
+ * @returns Progress with a null eventId, which is what makes the first pass ask
+ *   for the first page by id instead of resuming.
+ */
 const initialProgress = (): Progress => ({
   eventId: null,
   pages: 0,
@@ -88,15 +91,37 @@ const initialProgress = (): Progress => ({
   completed: false,
 });
 
+/**
+ * Progress from disk, or a fresh one.
+ *
+ * @returns The saved walk state, or `initialProgress()` when META_FILE is absent.
+ */
 const getProgress = (): Progress =>
   existsSync(META_FILE)
     ? (JSON.parse(readFileSync(META_FILE, 'utf8')) as Progress)
     : initialProgress();
+/**
+ * Write progress, stamping the time.
+ *
+ * Called after markets are appended, never before: a crash between the two
+ * re-fetches a wave rather than skipping it, and `bytes` lets the next run
+ * discard what was appended but never recorded.
+ *
+ * @param p - the progress to persist; its `updated_at` is set here.
+ */
 const saveProgress = (p: Progress) => {
   p.updated_at = new Date().toISOString();
   writeFileSync(META_FILE, JSON.stringify(p, null, 2));
 };
 
+/**
+ * The indexed window's start, from config.yaml.
+ *
+ * Read from config rather than passed in, so the seed's gate and the indexer's
+ * first block cannot disagree.
+ *
+ * @returns The start block and its timestamp in ms, which is the payout gate.
+ */
 async function getBlockId(): Promise<{ block: bigint; ms: number }> {
   const cfg = parseYaml(readFileSync('config.yaml', 'utf8')) as {
     chains?: { id: number; start_block: number }[];
@@ -125,6 +150,16 @@ const jsonLine = (v: unknown): string =>
     .replace(/\u2028/g, '\\u2028')
     .replace(/\u2029/g, '\\u2029');
 
+/**
+ * Highest event id in a batch.
+ *
+ * `reduce`, not `Math.max(...ids)`: on an empty batch Math.max() returns
+ * -Infinity, which JSON.stringify writes as `null` -- the same value that means
+ * "nothing saved", so the next run would restart from the first page.
+ *
+ * @param evs - events from one or more requests.
+ * @returns The highest id, or 0 when the batch is empty.
+ */
 const getMaxEventId = (evs: GammaEvent[]): number =>
   evs.reduce((hi, e) => {
     const n = Number(e.id);
@@ -262,6 +297,16 @@ async function fetchMarkets(): Promise<void> {
   );
 }
 
+/**
+ * A Gamma field that holds JSON *inside* a string.
+ *
+ * `outcomes`, `clobTokenIds` and `outcomePrices` all arrive as encoded text
+ * rather than arrays, and malformed ones are common enough that throwing would
+ * end a 12 GB pass over one bad market.
+ *
+ * @param v - the raw field.
+ * @returns Its elements, or [] if absent, unparseable, or not an array.
+ */
 const jsonArray = (v: unknown): string[] => {
   if (typeof v !== 'string') return [];
   try {
@@ -273,25 +318,20 @@ const jsonArray = (v: unknown): string[] => {
 };
 
 /**
- * Settled prices, or null when this market's `outcomePrices` is not a settlement.
+ * Settled prices, or null when `outcomePrices` is not a settlement.
  *
- * Rejections are all deferred to a chain read, so the reason no longer needs to
- * ride along. It did once: the reason breakdown is what established that 29.5%
- * of deferrals are 2021 AMM quotes and 69.5% are markets Gamma never priced,
- * and that of 3,506,830 markets NOT ONE was rejected for non-decimal text or
- * for a settlement of the wrong arity.
+ * It also carries LIVE QUOTES: a closed 2021 market returns
+ * ["0.0000004113679809846114013590098187297978", "0.9999995886..."] -- an AMM
+ * price, not a payout -- and taking it would book a redemption at a market quote.
  *
- * `outcomePrices` is NOT always settled -- it also carries live quotes. A closed
- * 2021 market returns
- * ["0.0000004113679809846114013590098187297978", "0.9999995886..."], which is an
- * AMM price, not a payout. Taking that as a settled price would book a
- * redemption at a market quote.
+ * The discriminator is exactness. A settlement is a clean ratio of the payout
+ * numerators, so in micro-units every entry is an INTEGER and the vector sums to
+ * exactly 1e6; ["0","1"] and ["0.5","0.5"] pass, the quote above does not. Same
+ * invariant `payout_sum` checks after the fact, applied before the row exists.
  *
- * The discriminator is exactness: a settlement is a clean ratio of the payout
- * numerators, so scaled to micro-units every entry is an INTEGER and the vector
- * sums to exactly 1e6. ["0","1"] and ["0.5","0.5"] pass; the 40-decimal quote
- * above does not. This is the same invariant `payout_sum` checks after the fact,
- * applied before the row is ever written.
+ * @param raw - decoded `outcomePrices`.
+ * @returns Micro-unit prices, or null. No reason accompanies a rejection because
+ *   every one of them is deferred to a ConditionResolution read.
  */
 function settledPrices(raw: string[]): bigint[] | null {
   if (raw.length === 0) return null;
@@ -310,213 +350,157 @@ function settledPrices(raw: string[]): bigint[] | null {
   return sum === COLLATERAL_SCALE ? out : null;
 }
 
-/**
- * questionIndex from questionID's last byte -- FOR NEG-RISK CONDITIONS ONLY.
- *
- * `getNegRiskQuestionId` builds a question id as the market id with its last
- * byte replaced by the index, so the byte IS the index. That construction is
- * neg-risk specific. For a standalone market `questionID` is an ordinary UMA
- * hash and its last byte is arbitrary: reading it anyway produced values like
- * 132, 188 and 73 on 16,958 of 18,914 non-neg-risk conditions -- meaningless
- * data that also DISAGREED with the live handler, which writes questionIndex
- * only from QuestionPrepared and therefore only for neg-risk questions.
- */
-function questionIndexOf(negRisk: boolean, questionID: string | undefined): number | null {
-  if (!negRisk) return null;
-  if (!questionID || !/^0x[0-9a-fA-F]{64}$/.test(questionID)) return null;
-  return parseInt(questionID.slice(-2), 16);
+const INSERT_BATCH = 10_000;
+const NEGRISK_FLUSH_SIZE = 400;
+const PAYOUT_FLUSH_SIZE = 250;
+
+interface SinkStats {
+  lines: number;
+  parsed: number;
+  tokens: number;
+  unparseable: number;
+  noConditionId: number;
+  noOutcomes: number;
+  gateBadTs: number;
+  gateAfter: number;
+  pricedGated: number;
+  deferred: number;
+  idMismatch: number;
+  chainPriced: number;
+  negCounted: number;
+  conditions: number;
 }
 
-// ── streaming pipeline: derive and insert in one pass ──────────────
-//
-// This replaced a phased design that wrote condition.tsv (340 MB) and
-// outcome_token.tsv (1.27 GB) and then loaded them -- two full passes over
-// derived data plus 1.6 GB of intermediate files whose only reader was the
-// loader. Deriving and inserting in one pass keeps memory flat and drops the
-// 3.5M-entry dedup Map, because the "prefer priced" rule moved into the upsert.
-//
-// Equivalence with the phased version was proven before it was deleted: the same
-// 12 GB corpus through both paths produced identical row counts and identical
-// additive md5 checksums across all 10.6M rows in Condition, OutcomeToken and
-// NegRiskEvent.
+/**
+ * Zeroed counters for one rebuild.
+ *
+ * @returns Fresh stats. Pure -- it opens no database resource, so it is safe to
+ *   construct outside a run.
+ */
+const createSinkStats = (): SinkStats => ({
+  lines: 0,
+  parsed: 0,
+  tokens: 0,
+  unparseable: 0,
+  noConditionId: 0,
+  noOutcomes: 0,
+  gateBadTs: 0,
+  gateAfter: 0,
+  pricedGated: 0,
+  deferred: 0,
+  idMismatch: 0,
+  chainPriced: 0,
+  negCounted: 0,
+  conditions: 0,
+});
+
+/** A batched INSERT sink. `flush` sends what is buffered without closing it. */
+interface Inserter {
+  write: (vals: Val[]) => Promise<void>;
+  flush: () => Promise<void>;
+  close: () => Promise<void>;
+}
 
 /**
- * Cap on rows written to the diagnostic TSVs. Holding them unbounded is the
- * mistake the join() emit made: today's 16,619 deferrals fit easily, but a
- * corpus where the gate misbehaves could defer millions and the diagnostic
- * would exhaust the run it exists to explain.
+ * A value bound as an INSERT parameter.
+ *
+ * `string[]` is for text[] columns -- node-postgres serialises a JS array into a
+ * Postgres array literal, which a joined string would not be.
  */
-const MAX_DETAIL = 50_000;
-/** Conditions buffered before a flush; their tokens ride along. */
-const COND_FLUSH = 10_000;
-/** Deferred conditions per ConditionResolution getLogs. */
-const DEFER_FLUSH = 250;
-/** Neg-risk market ids per getQuestionCount multicall. */
-const NEGRISK_FLUSH = 400;
+type Val = string | number | boolean | string[] | null;
 
-interface Sink {
-  startBlock: bigint;
-  cond: string[];
-  tok: string[];
-  defer: { id: string; slots: number }[];
-  /** Market ids already counted -- one read per event, not per condition. */
-  negSeen: Set<string>;
-  negBuf: string[];
-  mismatchOut: ReturnType<typeof createWriteStream> | null;
-  mismatchDetail: number;
-  c: {
-    lines: number;
-    seen: number;
-    unparseable: number;
-    noConditionId: number;
-    noOutcomes: number;
-    gateBadTs: number;
-    gateAfter: number;
-    pricedGated: number;
-    deferred: number;
-    idMismatch: number;
-    conditions: number;
-    tokens: number;
-    chainPriced: number;
-    negCounted: number;
+interface Market {
+  conditionId: string;
+  negRisk: boolean;
+  collateral: string;
+  questionIndex: number | null;
+  negRiskMarketId: string | null;
+  payoutPrices: bigint[] | null;
+  outcomeSlotCount: number;
+  invalidPayoutPrices: boolean;
+}
+
+/**
+ * Buffers rows and INSERTs them in batches, with bound parameters.
+ *
+ * EVERY `write` MUST PASS EXACTLY `cols.length` VALUES: placeholders are numbered
+ * `$(k * cols.length + c + 1)`, so a short row shifts every later tuple onto the
+ * wrong parameters.
+ *
+ * No ON CONFLICT, so a duplicate id aborts the load -- intended, and safe because
+ * the caller TRUNCATEs first. `limit` exists only to stay under the 65,535
+ * parameters one statement allows, hence dividing by the column count.
+ *
+ * @param table - destination table, which must be empty.
+ * @param cols - column order; `write` supplies one value per entry, in order.
+ * @returns A handle to `write` rows into, `flush`, and `close` when done.
+ */
+function insertHandler(table: string, cols: string[]): Inserter {
+  const names = cols.map((c) => `"${c}"`).join(', ');
+  const head = `INSERT INTO "${table}" (${names}) VALUES `;
+  const limit = Math.min(INSERT_BATCH, Math.floor(65_000 / cols.length));
+  let rows: Val[][] = [];
+
+  const write = async (vals: Val[]): Promise<void> => {
+    rows.push(vals);
+    if (rows.length >= limit) await flush();
+  };
+
+  const flush = async (): Promise<void> => {
+    if (!rows.length) return;
+    const batch = rows;
+    rows = [];
+    const tuples = batch.map(
+      (r, k) => `(${r.map((_, c) => `$${k * cols.length + c + 1}`).join(',')})`,
+    );
+    await pool.query(head + tuples.join(','), batch.flat());
+  };
+
+  const close = async (): Promise<void> => {
+    await flush();
+  };
+
+  return {
+    write,
+    flush,
+    close,
   };
 }
 
-const createSink = (startBlock: bigint): Sink => ({
-  startBlock,
-  cond: [],
-  tok: [],
-  defer: [],
-  negSeen: new Set(),
-  negBuf: [],
-  mismatchOut: createWriteStream(`${OUT_DIR}/id_mismatch.tsv`),
-  mismatchDetail: 0,
-  c: {
-    lines: 0,
-    seen: 0,
-    unparseable: 0,
-    noConditionId: 0,
-    noOutcomes: 0,
-    gateBadTs: 0,
-    gateAfter: 0,
-    pricedGated: 0,
-    deferred: 0,
-    idMismatch: 0,
-    conditions: 0,
-    tokens: 0,
-    chainPriced: 0,
-    negCounted: 0,
-  },
-});
-
 /**
- * Run a COPY script whose payload is a buffer rather than a file.
+ * Settled prices from the chain, for conditions Gamma could not price.
  *
- * The file-backed sibling exists because the TSVs are on disk; here the rows
- * were never written anywhere, so they go straight down psql's stdin.
+ * FLUSHES condOut first: the UPDATE joins on Condition.id, and rows still
+ * buffered in insertHandler would match nothing and lose their prices silently.
  *
- * @param header - SQL up to and including the COPY statement.
- * @param data - the COPY payload, newline-terminated rows.
- * @param footer - the `\.` terminator and the SQL after it.
- */
-async function psqlCopyData(header: string, data: string, footer: string): Promise<void> {
-  const { argv, env } = pgCommand('-v', 'ON_ERROR_STOP=1', '-f', '-');
-  const child = spawn(argv[0], argv.slice(1), { env, stdio: ['pipe', 'ignore', 'pipe'] });
-  let err = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (d: string) => {
-    err += d;
-  });
-  child.stdin.on('error', () => {});
-  const closed = once(child, 'close') as Promise<[number | null]>;
-  child.stdin.write(header);
-  child.stdin.write(data);
-  child.stdin.end(footer);
-  const [code] = await closed;
-  if (code !== 0) throw new Error(`psql exited ${code}: ${err.trim().slice(0, 600)}`);
-}
-
-/**
- * Conditions and their tokens, into Postgres.
- *
- * `payoutPrices` upserts through COALESCE rather than plain assignment: that is
- * where `build`'s "prefer the row that has prices" rule lives now that no Map
- * holds every condition. Measured zero duplicate conditionIds across 3,506,830
- * markets, so it never fires today -- it is here so it cannot silently regress.
- *
- * @param sink - buffers to drain.
- * @param force - drain regardless of the threshold.
- */
-async function flushRows(sink: Sink, force = false): Promise<void> {
-  if (!sink.cond.length || (!force && sink.cond.length < COND_FLUSH)) return;
-  const cols = quoted(CONDITION_COLS);
-  await psqlCopyData(
-    'BEGIN;\nCREATE TEMP TABLE _c (LIKE "Condition" INCLUDING DEFAULTS) ON COMMIT DROP;\n' +
-      `COPY _c (${cols}) FROM stdin WITH (FORMAT text, NULL '\\N');\n`,
-    sink.cond.join('\n') + '\n',
-    '\\.\n' +
-      `INSERT INTO "Condition" (${cols}) SELECT ${cols} FROM _c\n` +
-      'ON CONFLICT ("id") DO UPDATE SET\n' +
-      '  "outcomeSlotCount" = EXCLUDED."outcomeSlotCount",\n' +
-      '  "negRisk" = EXCLUDED."negRisk",\n' +
-      '  "negRiskMarketId" = EXCLUDED."negRiskMarketId",\n' +
-      '  "questionIndex" = EXCLUDED."questionIndex",\n' +
-      '  "payoutPrices" = COALESCE(EXCLUDED."payoutPrices", "Condition"."payoutPrices");\n' +
-      'COMMIT;\n',
-  );
-  sink.c.conditions += sink.cond.length;
-  sink.cond.length = 0;
-
-  if (sink.tok.length) {
-    const tcols = quoted(TOKEN_COLS);
-    await psqlCopyData(
-      'BEGIN;\nCREATE TEMP TABLE _t (LIKE "OutcomeToken" INCLUDING DEFAULTS) ON COMMIT DROP;\n' +
-        `COPY _t (${tcols}) FROM stdin WITH (FORMAT text, NULL '\\N');\n`,
-      sink.tok.join('\n') + '\n',
-      '\\.\n' +
-        `INSERT INTO "OutcomeToken" (${tcols}) SELECT ${tcols} FROM _t\n` +
-        'ON CONFLICT ("id") DO UPDATE SET "conditionId" = EXCLUDED."conditionId", ' +
-        '"outcomeIndex" = EXCLUDED."outcomeIndex", "collateral" = EXCLUDED."collateral";\n' +
-        'COMMIT;\n',
-    );
-    sink.c.tokens += sink.tok.length;
-    sink.tok.length = 0;
-  }
-}
-
-/**
- * Settled prices from the chain, for the conditions Gamma could not price.
- *
- * Flushes pending rows FIRST: the UPDATE targets Condition rows by id, so a
- * deferral whose condition has not been inserted yet would match nothing and
- * the price would be lost with no error.
+ * Guarded on `IS NULL` so a chain answer never overwrites an API one -- they
+ * should agree, and quietly preferring one would hide it if they did not.
  *
  * `toBlock` is pinned to startBlock - 1, so a resolution inside the indexed
- * window is never returned rather than filtered out afterwards -- the temporal
- * guarantee is structural, not a check that can be forgotten.
+ * window is never returned rather than filtered out after the fact.
  *
- * @param sink - buffers to drain.
- * @param force - drain regardless of the threshold.
+ * @param startBlock - chain reads are pinned below it.
+ * @param conditionIds - conditions to look up; not mutated, the caller drains.
+ * @returns How many conditions were priced.
  */
-async function flushDeferrals(sink: Sink, force = false): Promise<void> {
-  if (!sink.defer.length || (!force && sink.defer.length < DEFER_FLUSH)) return;
-  await flushRows(sink, true);
-
-  const batch = sink.defer.splice(0, sink.defer.length);
-  const ids = batch.map((d) => d.id as `0x${string}`);
+async function updatePayoutPrices(
+  startBlock: bigint,
+  conditionIds: readonly string[],
+): Promise<number> {
+  if (!conditionIds.length) return 0;
   const logs = await client.request({
     method: 'eth_getLogs',
     params: [
       {
         address: CONDITIONAL_TOKENS,
-        topics: [CONDITION_RESOLUTION as `0x${string}`, ids],
+        topics: [CONDITION_RESOLUTION as `0x${string}`, conditionIds as `0x${string}`[]],
         fromBlock: '0x0',
-        toBlock: `0x${(sink.startBlock - 1n).toString(16)}`,
+        toBlock: `0x${(startBlock - 1n).toString(16)}`,
       },
     ],
   });
 
-  const rows: string[] = [];
+  const payoutPrices: Record<string, bigint[]> = {};
   for (const l of logs) {
     const d = l.data.slice(2);
     const word = (n: number) => BigInt(`0x${d.slice(n * 64, (n + 1) * 64)}`);
@@ -524,40 +508,46 @@ async function flushDeferrals(sink: Sink, force = false): Promise<void> {
     const len = Number(word(off));
     const nums = Array.from({ length: len }, (_, k) => word(off + 1 + k));
     const den = nums.reduce((a, b) => a + b, 0n);
-    if (den === 0n) continue; // cancelled: nothing to price
-    const prices = nums.map((n) => (n * COLLATERAL_SCALE) / den);
-    rows.push(`${l.topics[1]?.toLowerCase()}\t{${prices.join(',')}}`);
+    if (den === 0n) continue;
+    const conditionId = l.topics[1]?.toLowerCase();
+    if (!conditionId) {
+      console.warn(`empty condition id has been detected from ${l.topics.join(',')}`);
+      continue;
+    }
+    payoutPrices[conditionId] = nums.map((n) => (n * COLLATERAL_SCALE) / den);
   }
-  if (!rows.length) return;
-  sink.c.chainPriced += rows.length;
+  const entries = Object.entries(payoutPrices);
+  if (!entries.length) return 0;
 
-  // Guarded on IS NULL so a chain answer can never overwrite an API answer.
-  await psqlCopyData(
-    'BEGIN;\nCREATE TEMP TABLE _p (id text, "payoutPrices" text[]) ON COMMIT DROP;\n' +
-      'COPY _p (id, "payoutPrices") FROM stdin WITH (FORMAT text, NULL \'\\N\');\n',
-    rows.join('\n') + '\n',
-    '\\.\nUPDATE "Condition" c SET "payoutPrices" = p."payoutPrices"\n' +
-      'FROM _p p WHERE c.id = p.id AND c."payoutPrices" IS NULL;\nCOMMIT;\n',
+  await condOut.flush();
+  await pool.query(
+    'UPDATE "Condition" c SET "payoutPrices" = v.prices::text[] ' +
+      'FROM (SELECT * FROM unnest($1::text[], $2::text[]) AS t(id, prices)) v ' +
+      'WHERE c.id = v.id AND c."payoutPrices" IS NULL',
+    [entries.map(([id]) => id), entries.map(([, prices]) => `{${prices.join(',')}}`)],
   );
+  return entries.length;
 }
 
 /**
  * `NegRiskEvent.questionCount`, read from the NegRiskAdapter.
  *
- * Not derived from max(questionIndex)+1 because Gamma's market list can be
- * short, and an undercount makes `indexSet >> questionCount` reject legitimate
- * conversions and misprices every YES leg through negRiskYesPrice's denominator.
+ * Not derived from max(questionIndex)+1: Gamma's market list can be short, and
+ * an undercount makes `indexSet >> questionCount` reject legitimate conversions
+ * and misprices every YES leg through negRiskYesPrice's denominator.
  *
- * @param sink - buffers to drain.
- * @param force - drain regardless of the threshold.
+ * Reads are issued together so viem's multicall can fold them; awaiting one at a
+ * time would batch nothing.
+ *
+ * @param marketIds - markets to read; not mutated, the caller drains.
+ * @returns Rows written. Ids whose count reads 0 or fails are skipped, so this
+ *   is below the number attempted rather than equal to it.
  */
-async function flushNegRisk(sink: Sink, force = false): Promise<void> {
-  if (!sink.negBuf.length || (!force && sink.negBuf.length < NEGRISK_FLUSH)) return;
-  const batch = sink.negBuf.splice(0, sink.negBuf.length);
-  // Issued together so the shared client's multicall can fold them; awaiting one
-  // at a time would batch nothing.
+async function updateNegRisk(marketIds: readonly string[]): Promise<number> {
+  if (!marketIds.length) return 0;
+  const markets = marketIds;
   const counts = await Promise.all(
-    batch.map((id) =>
+    markets.map((id) =>
       client
         .readContract({
           address: NEG_RISK_ADAPTER,
@@ -569,127 +559,109 @@ async function flushNegRisk(sink: Sink, force = false): Promise<void> {
         .catch(() => null),
     ),
   );
-  const rows: string[] = [];
-  for (let k = 0; k < batch.length; k++) {
+  let written = 0;
+  for (let k = 0; k < markets.length; k++) {
+    const id = markets[k];
     const n = counts[k];
-    if (!n) continue; // unreadable or zero: write nothing rather than a guess
-    rows.push(`${batch[k]}\t${n}`);
+    if (id === undefined || !n) continue;
+    await negOut.write([id, n]);
+    written++;
   }
-  if (!rows.length) return;
-  sink.c.negCounted += rows.length;
-  const ncols = quoted(NEGRISK_COLS);
-  await psqlCopyData(
-    'BEGIN;\nCREATE TEMP TABLE _n (LIKE "NegRiskEvent" INCLUDING DEFAULTS) ON COMMIT DROP;\n' +
-      `COPY _n (${ncols}) FROM stdin WITH (FORMAT text, NULL '\\N');\n`,
-    rows.join('\n') + '\n',
-    '\\.\n' +
-      `INSERT INTO "NegRiskEvent" (${ncols}) SELECT ${ncols} FROM _n\n` +
-      'ON CONFLICT ("id") DO UPDATE SET "questionCount" = EXCLUDED."questionCount";\n' +
-      'COMMIT;\n',
-  );
+  return written;
 }
 
 /**
- * One market: gate it, derive its token ids, buffer its rows.
+ * One Gamma market, reduced to the condition it describes.
  *
- * Extracted verbatim from `build`'s loop body so the two paths cannot drift --
- * the equivalence test compares their output against the same corpus.
+ * Writes nothing and owns no collection: it returns a description and bumps
+ * counters, and the caller decides which rows to insert and what to queue. Token
+ * ids are NOT returned -- only `outcomeSlotCount`, from which the caller derives
+ * them with getPositionId.
+ *
+ * `payoutPrices` is filled only when `updatedAt` predates the gate AND the prices
+ * are a real settlement of the right arity; otherwise `invalidPayoutPrices` marks
+ * the condition for a chain read.
  *
  * @param m - one parsed Gamma market object.
  * @param gateTs - start_block's timestamp in ms; payouts are seeded only from
  *   markets Gamma last touched before it.
- * @param sink - buffers and counters to write into.
+ * @param stats - counters to record into.
+ * @returns The condition, or null when the market has no valid conditionId or no
+ *   outcomes at all.
  */
-function deriveMarket(m: Record<string, unknown>, gateTs: number, sink: Sink): void {
-  const c = sink.c;
+function parseMarket(m: Record<string, unknown>, gateTs: number, stats: SinkStats): Market | null {
   const conditionId = (m.conditionId as string | undefined)?.toLowerCase();
   if (!conditionId || !/^0x[0-9a-f]{64}$/.test(conditionId)) {
-    c.noConditionId++;
-    return;
+    stats.noConditionId++;
+    return null;
   }
-  c.seen++;
+  stats.parsed++;
 
   const outcomes = jsonArray(m.outcomes);
   const clob = jsonArray(m.clobTokenIds);
   const outcomeSlotCount = outcomes.length || clob.length;
   if (!outcomeSlotCount) {
-    c.noOutcomes++;
-    return;
+    stats.noOutcomes++;
+    return null;
   }
 
   const negRisk = m.negRisk === true;
-  const questionIndex = questionIndexOf(negRisk, m.questionID as string | undefined);
+  const questionID = m.questionID as string | undefined;
+  const questionIndex =
+    negRisk && questionID && /^0x[0-9a-fA-F]{64}$/.test(questionID)
+      ? parseInt(questionID.slice(-2), 16)
+      : null;
 
   for (let i = 0; i < Math.min(clob.length, outcomeSlotCount); i++) {
     const want = clob[i];
     if (!want) continue;
     const got = getPositionId(conditionId, i, negRisk).toString();
     if (got !== want) {
-      c.idMismatch++;
-      if (sink.mismatchDetail < MAX_DETAIL) {
-        sink.mismatchDetail++;
-        sink.mismatchOut?.write(
-          [conditionId, i, outcomeSlotCount, negRisk ? 't' : 'f', want, got].join('\t') + '\n',
-        );
-      }
+      stats.idMismatch++;
+      console.log(
+        `  id mismatch ${conditionId} idx=${i} slots=${outcomeSlotCount} ` +
+          `negRisk=${negRisk ? 'true' : 'false'} gamma=${want} derived=${got}`,
+      );
     }
   }
 
   let payoutPrices: bigint[] | null = null;
+  let invalidPayoutPrices: boolean = false;
   const updatedAt = Date.parse((m.updatedAt as string) ?? '');
-  if (Number.isNaN(updatedAt)) c.gateBadTs++;
-  else if (updatedAt >= gateTs) c.gateAfter++;
+  if (Number.isNaN(updatedAt)) stats.gateBadTs++;
+  else if (updatedAt >= gateTs) stats.gateAfter++;
 
   if (!Number.isNaN(updatedAt) && updatedAt < gateTs) {
     const prices = settledPrices(jsonArray(m.outcomePrices));
-    // Arity still checked: a vector of the wrong length would break the
-    // payout-len invariant. Zero occurrences in 3,506,830 markets.
     if (prices && prices.length === outcomeSlotCount) {
       payoutPrices = prices;
-      c.pricedGated++;
+      stats.pricedGated++;
     } else {
-      c.deferred++;
-      sink.defer.push({ id: conditionId, slots: outcomeSlotCount });
+      invalidPayoutPrices = true;
+      stats.deferred++;
     }
   }
 
-  const N = '\\N';
   const negRiskMarketId = ((m.negRiskMarketID as string) ?? null)?.toLowerCase() ?? null;
-  sink.cond.push(
-    [
-      conditionId,
-      outcomeSlotCount,
-      negRisk ? 't' : 'f',
-      negRiskMarketId ?? N,
-      questionIndex ?? N,
-      payoutPrices ? `{${payoutPrices.join(',')}}` : N,
-    ].join('\t'),
-  );
+
   const collateral = negRisk ? NEG_RISK_WRAPPED_COLLATERAL : USDC;
-  for (let i = 0; i < outcomeSlotCount; i++) {
-    sink.tok.push(
-      [getPositionId(conditionId, i, negRisk).toString(), conditionId, i, collateral].join('\t'),
-    );
-  }
-  if (negRisk && negRiskMarketId && !sink.negSeen.has(negRiskMarketId)) {
-    sink.negSeen.add(negRiskMarketId);
-    sink.negBuf.push(negRiskMarketId);
-  }
+  return {
+    conditionId,
+    negRisk,
+    collateral,
+    questionIndex,
+    negRiskMarketId,
+    payoutPrices,
+    outcomeSlotCount,
+    invalidPayoutPrices,
+  };
 }
 
-// ── phase: chain ───────────────────────────────────────────────────
-
 const CONDITION_RESOLUTION = '0xb44d84d3289691f71497564b85d4233648d9dbae8cbdbb4329f301c3a0185894';
-
-// ── phase: negrisk ─────────────────────────────────────────────────
 
 const NEG_RISK_ABI = parseAbi([
   'function getQuestionCount(bytes32 marketId) view returns (uint256)',
 ]);
-
-// ── phase: load ────────────────────────────────────────────────────
-
-const execFileAsync = promisify(execFile);
 
 /** Column order must match the TSV writers above. A mismatch is SILENT:
  *  Postgres reads questionIndex into outcomeSlotCount happily, both being
@@ -705,92 +677,199 @@ const CONDITION_COLS = [
 const TOKEN_COLS = ['id', 'conditionId', 'outcomeIndex', 'collateral'];
 const NEGRISK_COLS = ['id', 'questionCount'];
 
-/**
- * argv and env for invoking psql.
- *
- * Mirrors scripts/_pgconn.py, which the Python verification scripts share. The
- * env vars are deliberately the ones envio itself reads, so the seed and the
- * indexer cannot end up pointed at different databases -- which would produce
- * results that look clean because they describe another dataset.
- *
- * @param flags - psql flags appended to the invocation; callers differ.
- * @returns argv to spawn, and the env to spawn it with.
- */
-function pgCommand(...flags: string[]): { argv: string[]; env: NodeJS.ProcessEnv } {
-  const host = process.env.ENVIO_PG_HOST;
-  const user = process.env.ENVIO_PG_USER ?? 'postgres';
-  const database = process.env.ENVIO_PG_DATABASE ?? 'envio-dev';
+const condOut = insertHandler('Condition', CONDITION_COLS);
+const tokOut = insertHandler('OutcomeToken', TOKEN_COLS);
+const negOut = insertHandler('NegRiskEvent', NEGRISK_COLS);
 
-  // No host means the local dev container. A real host is the RDS path.
-  if (!host) {
-    return {
-      argv: [
-        'docker',
-        'exec',
-        '-i',
-        process.env.ENVIO_PG_CONTAINER ?? 'envio-postgres',
-        'psql',
-        '-U',
-        user,
-        '-d',
-        database,
-        ...flags,
-      ],
-      env: process.env,
-    };
+const pool = new Pool({
+  host: process.env.ENVIO_PG_HOST ?? 'localhost',
+  port: Number(process.env.ENVIO_PG_PORT ?? 5433),
+  user: process.env.ENVIO_PG_USER ?? 'postgres',
+  database: process.env.ENVIO_PG_DATABASE ?? 'envio-dev',
+  password: process.env.ENVIO_PG_PASSWORD ?? 'testing',
+  ssl: process.env.ENVIO_PG_HOST
+    ? { rejectUnauthorized: (process.env.ENVIO_PG_SSLMODE ?? 'require') === 'verify-full' }
+    : undefined,
+  connectionTimeoutMillis: 15_000,
+  max: 4,
+});
+
+/**
+ * Run a statement, discarding any result.
+ *
+ * @param sql - the statement.
+ * @param params - bound parameters; never interpolated into `sql`.
+ */
+async function exec(sql: string, params: readonly unknown[] = []): Promise<void> {
+  await pool.query(sql, params as unknown[]);
+}
+
+/**
+ * One number out of Postgres.
+ *
+ * @param sql - a query whose first column of its first row is a count.
+ * @returns The value, or 0 when the query returned no rows.
+ */
+async function count(sql: string): Promise<number> {
+  const res = await pool.query<Record<string, string>>(sql);
+  const row = res.rows[0];
+  return row ? Number(Object.values(row)[0] ?? 0) || 0 : 0;
+}
+
+/**
+ * Derive the whole seed from the archived corpus and insert it.
+ *
+ * This is what re-runs when start_block moves: the gate changes, so every payout
+ * decision changes, and nothing needs re-fetching.
+ *
+ * STREAMED line by line -- the corpus is 12 GB and Node caps a string near
+ * 512 MB.
+ *
+ * TRUNCATEs first, which is required rather than tidy: the inserts carry no ON
+ * CONFLICT, so anything already present aborts the load. Refuses outright when
+ * UserPosition has rows -- seeding over an indexed schema would overwrite
+ * event-derived data with values derived from metadata.
+ *
+ * Owns the two batch arrays and drains them at the call site; the inserters are
+ * module-level.
+ *
+ * @param gateTs - start_block's timestamp in ms.
+ * @param startBlock - start_block; chain reads are pinned below it.
+ * @returns Structural problems found by the closing verification; 0 is clean.
+ */
+async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<number> {
+  const indexed = await count('SELECT count(*) FROM "UserPosition"');
+  if (indexed) {
+    throw new Error(
+      `UserPosition already has ${indexed.toLocaleString()} rows — the indexer has run. ` +
+        'Seed before `envio start`, not after.',
+    );
   }
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  if (process.env.ENVIO_PG_PASSWORD) env.PGPASSWORD = process.env.ENVIO_PG_PASSWORD;
-  // `require`, not libpq's `prefer`: prefer falls back to plaintext against an
-  // instance without rds.force_ssl and sends the password in the clear.
-  env.PGSSLMODE ??= process.env.ENVIO_PG_SSLMODE ?? 'require';
-  // Fail fast rather than hang on the TCP default when a security group has not
-  // been opened -- the likeliest first-run failure against RDS.
-  env.PGCONNECT_TIMEOUT ??= '15';
-  return {
-    argv: [
-      'psql',
-      '-h',
-      host,
-      '-p',
-      process.env.ENVIO_PG_PORT ?? '5432',
-      '-U',
-      user,
-      '-d',
-      database,
-      '-v',
-      'ON_ERROR_STOP=1',
-      ...flags,
+  await exec('TRUNCATE "Condition", "OutcomeToken", "NegRiskEvent"');
+
+  const t0 = Date.now();
+  const stats = createSinkStats();
+  const conditionIds: string[] = [];
+
+  const negSeen = new Set<string>();
+  const negMarketIds: string[] = [];
+
+  const rl = createInterface({ input: createReadStream(RAW, 'utf8'), crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    stats.lines++;
+    let m: Record<string, unknown>;
+    try {
+      m = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      stats.unparseable++;
+      continue;
+    }
+
+    const market = parseMarket(m, gateTs, stats);
+    if (market) {
+      const conditionId = market.conditionId;
+      const negRiskMarketId = market.negRiskMarketId;
+      await condOut.write([
+        conditionId,
+        market.outcomeSlotCount,
+        market.negRisk,
+        negRiskMarketId,
+        market.questionIndex,
+        market.payoutPrices?.map(String) ?? null,
+      ]);
+      for (let i = 0; i < market.outcomeSlotCount; i++) {
+        await tokOut.write([
+          getPositionId(conditionId, i, market.negRisk).toString(),
+          conditionId,
+          i,
+          market.collateral,
+        ]);
+      }
+      stats.conditions++;
+      stats.tokens += market.outcomeSlotCount;
+      if (market.invalidPayoutPrices) conditionIds.push(conditionId);
+      if (negRiskMarketId && !negSeen.has(negRiskMarketId)) {
+        negSeen.add(negRiskMarketId);
+        negMarketIds.push(negRiskMarketId);
+      }
+    }
+    if (conditionIds.length >= PAYOUT_FLUSH_SIZE) {
+      stats.chainPriced += await updatePayoutPrices(
+        startBlock,
+        conditionIds.splice(0, conditionIds.length),
+      );
+    }
+    if (negMarketIds.length >= NEGRISK_FLUSH_SIZE) {
+      stats.negCounted += await updateNegRisk(negMarketIds.splice(0, negMarketIds.length));
+    }
+
+    if (stats.lines % 500_000 === 0) {
+      console.log(
+        `    ${stats.lines.toLocaleString()} markets  ` +
+          `${stats.conditions.toLocaleString()} conditions in  ` +
+          `${Math.round((Date.now() - t0) / 1000)}s`,
+      );
+    }
+  }
+
+  stats.chainPriced += await updatePayoutPrices(
+    startBlock,
+    conditionIds.splice(0, conditionIds.length),
+  );
+  stats.negCounted += await updateNegRisk(negMarketIds.splice(0, negMarketIds.length));
+
+  await condOut.close();
+  await tokOut.close();
+  await negOut.close();
+  console.log(`  gate: updatedAt < ${new Date(gateTs).toISOString()}`);
+  console.log(`  elapsed ${Math.round((Date.now() - t0) / 1000)}s`);
+
+  report(stats);
+  return await verifySeed();
+}
+
+/**
+ * Print the run's counters.
+ *
+ * `processed` is the audit: every line lands in exactly one bucket, so the
+ * six must sum to the line count. A mismatch means a branch is double-counting
+ * or dropping markets, which makes every other number here suspect.
+ *
+ * @param stats - counters gathered during the walk.
+ */
+function report(stats: SinkStats): void {
+  const processed =
+    stats.unparseable +
+    stats.noConditionId +
+    stats.noOutcomes +
+    stats.gateAfter +
+    stats.gateBadTs +
+    stats.pricedGated +
+    stats.deferred;
+  const report: [string, string][] = [
+    ['markets parsed', stats.parsed.toLocaleString()],
+    ['Condition rows', stats.conditions.toLocaleString()],
+    ['OutcomeToken rows', stats.tokens.toLocaleString()],
+    ['payoutPrices seeded', stats.pricedGated.toLocaleString()],
+    ['validation needed', stats.deferred.toLocaleString()],
+    ['...priced from chain', stats.chainPriced.toLocaleString()],
+    ['NegRiskEvent counted', stats.negCounted.toLocaleString()],
+    ['derived-id mismatches', `${stats.idMismatch.toLocaleString()}  (expect 95)`],
+    ['no/invalid conditionId', stats.noConditionId.toLocaleString()],
+    ['no outcomes or clob ids', stats.noOutcomes.toLocaleString()],
+    [`at/after gate`, stats.gateAfter.toLocaleString()],
+    ['updatedAt unparseable', stats.gateBadTs.toLocaleString()],
+    [
+      'processed',
+      processed === stats.lines
+        ? `${processed.toLocaleString()} = ${stats.lines.toLocaleString()} lines`
+        : `${processed.toLocaleString()} != ${stats.lines.toLocaleString()} LINES -- DOES NOT BALANCE`,
     ],
-    env,
-  };
+  ];
+  for (const [k, v] of report) console.log(k ? `  ${k.padEnd(25)}${v}` : '');
 }
-
-/**
- * One scalar out of Postgres.
- *
- * @param sql - a query returning a single value.
- * @returns Its value as trimmed text, '' when the query returned no rows.
- */
-async function psql(sql: string): Promise<string> {
-  const { argv, env } = pgCommand('-tAc', sql);
-  try {
-    const { stdout } = await execFileAsync(argv[0], argv.slice(1), {
-      env,
-      maxBuffer: 1 << 24,
-    });
-    return stdout.trim();
-  } catch (e) {
-    const err = e as { stderr?: string; message?: string };
-    throw new Error(`psql: ${(err.stderr || err.message || '').trim().slice(0, 400)}`, {
-      cause: e,
-    });
-  }
-}
-
-const quoted = (cols: string[]): string => cols.map((c) => `"${c}"`).join(', ');
-
 /**
  * The structural invariants that would make a loaded seed useless.
  *
@@ -809,11 +888,11 @@ const quoted = (cols: string[]): string => cols.map((c) => `"${c}"`).join(', ');
 async function verifySeed(): Promise<number> {
   // ── verification ─────────────────────────────────────────────────
   console.log('\n  verification');
-  const scalar = async (sql: string): Promise<number> => Number(await psql(sql)) || 0;
-  const conds = await scalar('SELECT count(*) FROM "Condition"');
-  const toks = await scalar('SELECT count(*) FROM "OutcomeToken"');
-  const priced = await scalar('SELECT count(*) FROM "Condition" WHERE "payoutPrices" IS NOT NULL');
-  const negs = await scalar('SELECT count(*) FROM "NegRiskEvent"');
+
+  const conds = await count('SELECT count(*) FROM "Condition"');
+  const toks = await count('SELECT count(*) FROM "OutcomeToken"');
+  const priced = await count('SELECT count(*) FROM "Condition" WHERE "payoutPrices" IS NOT NULL');
+  const negs = await count('SELECT count(*) FROM "NegRiskEvent"');
   console.log(`    Condition rows                ${conds.toLocaleString().padStart(12)}`);
   console.log(`    OutcomeToken rows             ${toks.toLocaleString().padStart(12)}`);
   console.log(`    ...with payoutPrices          ${priced.toLocaleString().padStart(12)}`);
@@ -896,7 +975,7 @@ async function verifySeed(): Promise<number> {
 
   let problems = 0;
   for (const { label, sql } of checks) {
-    const n = await scalar(sql);
+    const n = await count(sql);
     problems += n;
     console.log(`    ${label.padEnd(30)}${n.toLocaleString().padStart(12)}${n ? '  <- BAD' : ''}`);
   }
@@ -909,100 +988,6 @@ async function verifySeed(): Promise<number> {
     console.log('\n  clean. Safe to `envio start` — it will resume and keep these rows.');
   }
   return problems;
-}
-
-/**
- * Derive and insert straight from the archived corpus, with no TSVs.
- *
- * The offline half of the streaming pipeline: same derivation as the network
- * path, fed from markets.jsonl instead of Gamma. This is what re-runs when
- * start_block moves -- the gate changes, every payout decision changes, and
- * nothing needs re-fetching.
- *
- * STREAMED, not read whole: the corpus is 12 GB and Node caps a string near
- * 512 MB.
- *
- * @param gateTs - start_block's timestamp in ms.
- * @param startBlock - start_block; chain reads are pinned below it.
- * @returns Structural problems found by the closing verification; 0 is clean.
- */
-async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<number> {
-  if (!existsSync(RAW)) throw new Error(`${RAW} missing — run --phase fetch first`);
-
-  // Same guard as the loader: seed rows would overwrite event-derived ones.
-  const indexed = Number(await psql('SELECT count(*) FROM "UserPosition"')) || 0;
-  if (indexed) {
-    throw new Error(
-      `UserPosition already has ${indexed.toLocaleString()} rows — the indexer has run. ` +
-        'Seed before `envio start`, not after.',
-    );
-  }
-
-  const sink = createSink(startBlock);
-  const t0 = Date.now();
-  const rl = createInterface({ input: createReadStream(RAW, 'utf8'), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line.trim()) continue;
-    sink.c.lines++;
-    let m: Record<string, unknown>;
-    try {
-      m = JSON.parse(line) as Record<string, unknown>;
-    } catch {
-      sink.c.unparseable++;
-      continue;
-    }
-    deriveMarket(m, gateTs, sink);
-    await flushRows(sink);
-    await flushDeferrals(sink);
-    await flushNegRisk(sink);
-    if (sink.c.lines % 500_000 === 0) {
-      console.log(
-        `    ${sink.c.lines.toLocaleString()} markets  ` +
-          `${sink.c.conditions.toLocaleString()} conditions in  ` +
-          `${Math.round((Date.now() - t0) / 1000)}s`,
-      );
-    }
-  }
-  // Remainders, regardless of thresholds. Deferrals last but one: the flush
-  // drains pending rows first, so their conditions exist before the UPDATE.
-  await flushRows(sink, true);
-  await flushDeferrals(sink, true);
-  await flushNegRisk(sink, true);
-  sink.mismatchOut?.end();
-  if (sink.mismatchOut) await once(sink.mismatchOut, 'finish');
-
-  const c = sink.c;
-  console.log(`\n  markets parsed          ${c.seen.toLocaleString()}`);
-  console.log(`  Condition rows          ${c.conditions.toLocaleString()}`);
-  console.log(`  OutcomeToken rows       ${c.tokens.toLocaleString()}`);
-  console.log(`  payoutPrices seeded     ${c.pricedGated.toLocaleString()}`);
-  console.log(`  deferred to chain       ${c.deferred.toLocaleString()}`);
-  console.log(`  ...priced from chain    ${c.chainPriced.toLocaleString()}`);
-  console.log(`  NegRiskEvent counted    ${c.negCounted.toLocaleString()}`);
-  console.log(`  derived-id mismatches   ${c.idMismatch.toLocaleString()}  (expect 95)`);
-  console.log(`\n  skipped before the gate`);
-  console.log(`    no/invalid conditionId  ${c.noConditionId.toLocaleString()}`);
-  console.log(`    no outcomes or clob ids ${c.noOutcomes.toLocaleString()}`);
-  console.log(`\n  gate (updatedAt < ${new Date(gateTs).toISOString()})`);
-  console.log(`    before  -> considered   ${(c.pricedGated + c.deferred).toLocaleString()}`);
-  console.log(`    at/after -> no price    ${c.gateAfter.toLocaleString()}`);
-  console.log(`    updatedAt unparseable   ${c.gateBadTs.toLocaleString()}`);
-  const accounted =
-    c.unparseable +
-    c.noConditionId +
-    c.noOutcomes +
-    c.gateAfter +
-    c.gateBadTs +
-    c.pricedGated +
-    c.deferred;
-  console.log(
-    `    accounted for           ${accounted.toLocaleString()}` +
-      (accounted === c.lines
-        ? `  = ${c.lines.toLocaleString()} lines`
-        : `  != ${c.lines.toLocaleString()} LINES -- BUCKETS DO NOT BALANCE`),
-  );
-  console.log(`\n  elapsed ${Math.round((Date.now() - t0) / 1000)}s`);
-  return verifySeed();
 }
 
 // ── main ───────────────────────────────────────────────────────────
