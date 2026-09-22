@@ -16,11 +16,13 @@
   },
   "dependencies": {
     "envio": "3.6.1",
+    "pg": "^8.23.0",
     "viem": "2.54.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.10.1",
+    "@types/pg": "^8.23.1",
     "eslint": "^10.9.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.11.0",
