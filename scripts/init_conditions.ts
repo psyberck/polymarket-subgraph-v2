@@ -59,6 +59,7 @@ const CONDITION_COLS = [
 ];
 const TOKEN_COLS = ['id', 'conditionId', 'outcomeIndex', 'collateral'];
 const NEGRISK_COLS = ['id', 'questionCount'];
+
 /**
  * Sink Status
  */
@@ -96,6 +97,7 @@ type Val = string | number | boolean | string[] | null;
 
 interface Market {
   conditionId: string;
+  positionIds: string[];
   negRisk: boolean;
   collateral: string;
   questionIndex: number | null;
@@ -406,17 +408,19 @@ function parseMarket(m: Record<string, unknown>, gateTs: number, stats: SinkStat
       ? parseInt(questionID.slice(-2), 16)
       : null;
 
+  const positionIds = Array.from({ length: outcomeSlotCount }, (_, i) =>
+    getPositionId(conditionId, i, negRisk).toString(),
+  );
+
   for (let i = 0; i < Math.min(clob.length, outcomeSlotCount); i++) {
     const want = clob[i];
-    if (!want) continue;
-    const got = getPositionId(conditionId, i, negRisk).toString();
-    if (got !== want) {
-      stats.idMismatch++;
-      console.log(
-        `  id mismatch ${conditionId} idx=${i} slots=${outcomeSlotCount} ` +
-          `negRisk=${negRisk ? 'true' : 'false'} gamma=${want} derived=${got}`,
-      );
-    }
+    const got = positionIds[i];
+    if (!want || got === want) continue;
+    stats.idMismatch++;
+    console.log(
+      `  id mismatch ${conditionId} idx=${i} slots=${outcomeSlotCount} ` +
+        `negRisk=${negRisk ? 'true' : 'false'} gamma=${want} derived=${got}`,
+    );
   }
 
   let payoutPrices: bigint[] | null = null;
@@ -441,6 +445,7 @@ function parseMarket(m: Record<string, unknown>, gateTs: number, stats: SinkStat
   const collateral = negRisk ? NEG_RISK_WRAPPED_COLLATERAL : USDC;
   return {
     conditionId,
+    positionIds,
     negRisk,
     collateral,
     questionIndex,
@@ -514,13 +519,9 @@ async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<numb
         market.questionIndex,
         market.payoutPrices?.map(String) ?? null,
       ]);
-      for (let i = 0; i < market.outcomeSlotCount; i++) {
-        await tokOut.write([
-          getPositionId(conditionId, i, market.negRisk).toString(),
-          conditionId,
-          i,
-          market.collateral,
-        ]);
+      let outcomeIndex = 0;
+      for (const positionId of market.positionIds) {
+        await tokOut.write([positionId, conditionId, outcomeIndex++, market.collateral]);
       }
       stats.conditions++;
       stats.tokens += market.outcomeSlotCount;
