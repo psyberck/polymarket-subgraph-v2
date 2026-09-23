@@ -14,9 +14,7 @@ import type { EvmOnEventContext } from 'envio';
  * @param conditionId - 0x-prefixed 32-byte condition id.
  * @returns The event's question count, or `null` -- which means UNKNOWN, NEVER
  *   "not neg-risk". Callers must keep those apart: a standalone condition and a
- *   neg-risk event of unknown size both answer null, and collapsing them prices
- *   an 11-question leg at 1/2 instead of 1/11, a 5.5x cost-basis error. That is
- *   why AdapterTransfers refuses to price on null rather than falling through.
+ *   neg-risk event of unknown size both answer null.
  */
 const negRiskEventSize = async (
   context: EvmOnEventContext,

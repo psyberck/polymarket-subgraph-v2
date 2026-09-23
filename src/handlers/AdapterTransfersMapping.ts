@@ -16,7 +16,6 @@ import {
   V2_START_BLOCK,
   ZERO_ADDRESS,
 } from '@utils/constants';
-import { negRiskEventSize } from '@utils/negrisk-utils';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
@@ -48,18 +47,8 @@ async function getPrice(
   if (!conditionId) return FIFTY_CENTS;
 
   const condition = await context.Condition.get(conditionId);
-  if (condition && !condition.negRisk) {
-    return condition.outcomeSlotCount > 0
-      ? splitNegRiskPrice(condition.outcomeSlotCount)
-      : FIFTY_CENTS;
-  }
-
-  let count = await negRiskEventSize(context, conditionId);
-  if (count === 0) {
-    count = (await context.Condition.get(conditionId))?.outcomeSlotCount ?? null;
-  }
-  if (count === null) return null;
-  return count > 0 ? splitNegRiskPrice(count) : FIFTY_CENTS;
+  if (!condition || condition.outcomeSlotCount <= 0) return null;
+  return splitNegRiskPrice(condition.outcomeSlotCount);
 }
 
 async function mutate(
@@ -91,7 +80,7 @@ async function mutate(
       const price = await getPrice(context, conditionId);
       if (price === null) {
         context.log.warn(
-          `Adapter split skipped, neg-risk question count unreadable: ` +
+          `Adapter split skipped, condition unknown: ` +
             `condition=${conditionId} token=${tokenId} wallet=${wallet} ` +
             `block=${event.block.number}`,
         );
@@ -106,7 +95,7 @@ async function mutate(
       const settledPrice = settled ?? (await getPrice(context, conditionId));
       if (settledPrice === null) {
         context.log.warn(
-          `Adapter surrender skipped, neg-risk question count unreadable: ` +
+          `Adapter surrender skipped, condition unknown: ` +
             `condition=${conditionId} token=${tokenId} wallet=${wallet} ` +
             `block=${event.block.number}`,
         );
