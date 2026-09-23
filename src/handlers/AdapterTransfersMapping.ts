@@ -47,6 +47,13 @@ async function getPrice(
 ): Promise<bigint | null> {
   if (!conditionId) return FIFTY_CENTS;
 
+  const condition = await context.Condition.get(conditionId);
+  if (condition && !condition.negRisk) {
+    return condition.outcomeSlotCount > 0
+      ? splitNegRiskPrice(condition.outcomeSlotCount)
+      : FIFTY_CENTS;
+  }
+
   let count = await negRiskEventSize(context, conditionId);
   if (count === 0) {
     count = (await context.Condition.get(conditionId))?.outcomeSlotCount ?? null;
