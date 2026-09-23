@@ -101,7 +101,8 @@ export async function verify(): Promise<number> {
         sql:
           'SELECT count(*) FROM "Condition" c JOIN "NegRiskEvent" e ' +
           'ON e.id = c."negRiskMarketId" ' +
-          'WHERE c."questionIndex" IS NOT NULL AND c."questionIndex" >= e."questionCount"',
+          'WHERE c."questionIndex" IS NOT NULL AND e."questionCount" > 0 ' +
+          'AND c."questionIndex" >= e."questionCount"',
       },
     );
   }
