@@ -127,7 +127,7 @@ async function run(r: Request): Promise<Response> {
 
   /**
    * Drains `negMarketIds` and writes their questionCount from the NegRiskAdapter.
-   * Reads need an archive node; failed or zero reads are skipped.
+   * Reads need an archive node; failed reads are skipped.
    *
    * @returns Resolves once the rows are buffered in negOut.
    */
@@ -152,7 +152,7 @@ async function run(r: Request): Promise<Response> {
     for (let k = 0; k < ids.length; k++) {
       const id = ids[k];
       const n = counts[k];
-      if (id === undefined || !n) continue;
+      if (id === undefined || n === null || n === undefined) continue;
       await negOut.write([id, n]);
     }
   };
