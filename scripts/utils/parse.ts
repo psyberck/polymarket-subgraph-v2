@@ -212,7 +212,9 @@ export function insertHandler(table: string, cols: string[], onConflict?: string
  *
  * `payoutPrices` is filled only when `updatedAt` predates the gate AND the prices
  * are a real settlement of the right arity; otherwise `invalidPayoutPrices` marks
- * the condition for a chain read.
+ * the condition for a chain read. That includes markets updated at/after the
+ * gate: `updatedAt` is Gamma's last touch, not the resolution time, and the chain
+ * read is pinned below start_block, so it answers whether they had resolved.
  *
  * @param m - one parsed Gamma market object.
  * @param gateTs - start_block's timestamp in ms; payouts are seeded only from
@@ -266,18 +268,21 @@ export function parseMarket(
   }
 
   let payoutPrices: bigint[] | null = null;
-  let invalidPayoutPrices: boolean = false;
+  let invalidPayoutPrices: boolean = true;
   const updatedAt = Date.parse((m.updatedAt as string) ?? '');
-  if (Number.isNaN(updatedAt)) stats.gateBadTs++;
-  else if (updatedAt >= gateTs) stats.gateAfter++;
+  if (Number.isNaN(updatedAt)) {
+    stats.gateBadTs++;
+  } else if (updatedAt >= gateTs) {
+    stats.gateAfter++;
+  }
 
   if (!Number.isNaN(updatedAt) && updatedAt < gateTs) {
     const prices = settledPrices(jsonArray(m.outcomePrices));
     if (prices && prices.length === outcomeSlotCount) {
-      payoutPrices = prices;
       stats.pricedGated++;
+      payoutPrices = prices;
+      invalidPayoutPrices = false;
     } else {
-      invalidPayoutPrices = true;
       stats.deferred++;
     }
   }
