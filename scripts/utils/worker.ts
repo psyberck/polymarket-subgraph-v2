@@ -3,7 +3,11 @@ import { createInterface } from 'node:readline';
 import { parentPort } from 'node:worker_threads';
 import { createPublicClient, http, parseAbi } from 'viem';
 import { polygon } from 'viem/chains';
-import { COLLATERAL_SCALE, CONDITIONAL_TOKENS, NEG_RISK_ADAPTER } from '@utils/constants';
+import {
+  COLLATERAL_SCALE,
+  CONDITIONAL_TOKENS,
+  NEG_RISK_ADAPTER,
+} from '../../src/utils/constants.ts';
 import {
   CONDITION_COLS,
   createSinkStats,
@@ -12,8 +16,8 @@ import {
   parseMarket,
   type SinkStats,
   TOKEN_COLS,
-} from './parse';
-import { pool } from './postgres';
+} from './parse.ts';
+import { pool } from './postgres.ts';
 
 /** A slice of the corpus for one worker. */
 export interface Request {

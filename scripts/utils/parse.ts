@@ -1,6 +1,6 @@
-import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '@utils/constants';
-import { computePositionId } from '@utils/ctf-utils';
-import { pool } from './postgres';
+import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '../../src/utils/constants.ts';
+import { computePositionId } from '../../src/utils/ctf-utils.ts';
+import { pool } from './postgres.ts';
 
 /**
  * Batch size
