@@ -6,7 +6,7 @@
  * entry point instead.
  */
 import { pathToFileURL } from 'node:url';
-import { count } from './utils/postgres';
+import { count } from './utils/postgres.ts';
 
 /**
  * The structural invariants that would make a loaded seed useless.
