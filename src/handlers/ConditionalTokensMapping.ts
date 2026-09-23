@@ -85,6 +85,7 @@ async function getCollateralTokenIds(
   collateral: string,
   indexSets: readonly bigint[],
 ) {
+  collateral = collateral.toLowerCase();
   if (PUSD_COLLATERALS.has(collateral)) {
     return [];
   }
