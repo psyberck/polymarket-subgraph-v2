@@ -10,6 +10,7 @@ import { upsertCondition } from '@utils/upsertCondition';
 import { getNegRiskConditionId } from '@utils/getNegRiskConditionId';
 import {
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V1,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V2,
   NEG_RISK_EXCHANGE,
@@ -44,13 +45,14 @@ const NEG_RISK_LIFECYCLE_NON_OWNERS: string[] = [
  * Addresses that can be `redeemer` on a neg-risk redemption without owning the
  * position.
  *
- * `NEG_RISK_LIFECYCLE_NON_OWNERS` plus the AutoRedeemer, which redeems on a
+ * `NEG_RISK_LIFECYCLE_NON_OWNERS` plus both auto-redeemers, which redeem on a
  * user's behalf: the payout reaches the wallet, so crediting the redeemer
  * invents a position that never existed.
  */
 const NEG_RISK_REDEEM_NON_OWNERS: string[] = [
   ...NEG_RISK_LIFECYCLE_NON_OWNERS,
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
 ] as const;
 
 /**

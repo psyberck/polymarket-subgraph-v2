@@ -2,6 +2,7 @@ import { type EvmEvent, type EvmOnEventContext, indexer } from 'envio';
 import { getAddress } from 'viem';
 import {
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   CTF_COLLATERAL_ADAPTER_V1,
   CTF_COLLATERAL_ADAPTER_V2,
   EXCHANGE,
@@ -26,6 +27,7 @@ const V2_ADAPTERS = [
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V1,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V2,
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
 ].map((a) => getAddress(a));
 
 const ADAPTER_ADDRESS_SET = new Set(V2_ADAPTERS.map((a) => a.toLowerCase()));

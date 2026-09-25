@@ -10,6 +10,7 @@
 
 import {
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   COLLATERAL_SCALE,
   CTF_COLLATERAL_ADAPTER_V1,
   CTF_COLLATERAL_ADAPTER_V2,
@@ -49,10 +50,13 @@ const SET_OPERATORS: ReadonlySet<string> = new Set<string>([
   NEG_RISK_EXCHANGE,
 ]);
 
-/** Contracts that redeem on a user's behalf: the set operators plus
- *  AutoRedeemer, which redeems for 50.3% of events and is booked by
- *  AdapterTransfers instead. */
-const REDEEM_OPERATORS: ReadonlySet<string> = new Set<string>([...SET_OPERATORS, AUTO_REDEEMER]);
+/** Contracts that redeem on a user's behalf: the set operators plus both
+ *  auto-redeemers, which are booked by AdapterTransfers instead. */
+const REDEEM_OPERATORS: ReadonlySet<string> = new Set<string>([
+  ...SET_OPERATORS,
+  AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
+]);
 
 /**
  * pUSD, skipped without deriving ids: a cash layer, not a CTF denomination.

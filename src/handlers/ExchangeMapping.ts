@@ -12,6 +12,7 @@
 import { indexer } from 'envio';
 import {
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   COLLATERAL_SCALE,
   COMBOS_EXCHANGE,
   COMBOS_POSITION_MANAGER,
@@ -38,6 +39,7 @@ import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
  */
 const ORDER_FILLED_NON_USER_ADDRESSES: string[] = [
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   COMBOS_POSITION_MANAGER,
   COMBOS_EXCHANGE,
   EXCHANGE,

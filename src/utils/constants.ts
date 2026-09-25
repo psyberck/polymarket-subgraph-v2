@@ -32,6 +32,13 @@ const NEG_RISK_ESCROW_SINK = '0xa5ef39c3d3e10d0b270233af41cac69796b12966' as con
  *  position. */
 const AUTO_REDEEMER = '0xa1200000d0002264c9a1698e001292d00e1b00af' as const;
 
+/**
+ * The first-generation auto-redeemer, still live beside AUTO_REDEEMER and
+ * handled identically: it pulls a wallet's resolved tokens, redeems them as the
+ * `PayoutRedemption` redeemer, and pays the wallet in pUSD.
+ */
+const AUTO_REDEEMER_V1 = '0xf3cfb6a6ebfeb51876289eb235719eb1c65252b0' as const;
+
 /** Burn/mint counterparty on CTF transfers. */
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const;
 
@@ -136,6 +143,7 @@ type TradeType = (typeof TradeType)[keyof typeof TradeType];
 
 export {
   AUTO_REDEEMER,
+  AUTO_REDEEMER_V1,
   COLLATERAL_SCALE,
   COMBOS_EXCHANGE,
   COMBOS_POSITION_MANAGER,
