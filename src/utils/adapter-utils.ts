@@ -107,6 +107,14 @@ const applyPositionRedeem = async (
     );
     return;
   }
+
+  if (tokenIds.length !== amounts.length || amounts.length !== prices.length) {
+    context.log.warn(
+      `Adapter redemption outcome mismatch: condition=${conditionId} ` +
+        `tokens=${tokenIds.length} amounts=${amounts.length} prices=${prices.length}`,
+    );
+  }
+
   const outcomes = Math.min(tokenIds.length, amounts.length, prices.length);
   for (let i = 0; i < outcomes; i++) {
     await updateUserPositionWithSell(
