@@ -51,7 +51,7 @@ const SET_OPERATORS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /** Contracts that redeem on a user's behalf: the set operators plus both
- *  auto-redeemers, which are booked by AdapterTransfers instead. */
+ *  auto-redeemers, which are booked from their own (AutoRedeemerMapping) events. */
 const REDEEM_OPERATORS: ReadonlySet<string> = new Set<string>([
   ...SET_OPERATORS,
   AUTO_REDEEMER,
