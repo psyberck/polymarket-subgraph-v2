@@ -1,12 +1,6 @@
 import { indexer } from 'envio';
-import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
-import { getConditionPositionIds } from '@utils/getPositionId';
-import { computeNegRiskYesPrice, splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
-import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
-import { indexSetContains } from '@utils/indexSetContains';
-import { getNegRiskPositionId } from '@utils/getNegRiskPositionId';
-import { loadUserPosition } from '@utils/loadUserPosition';
 import { upsertCondition } from '@utils/upsertCondition';
+import { applyNegRiskConversion } from '@utils/negrisk-utils';
 import { getNegRiskConditionId } from '@utils/getNegRiskConditionId';
 import {
   AUTO_REDEEMER,
@@ -16,10 +10,8 @@ import {
   NEG_RISK_EXCHANGE,
   NEG_RISK_EXCHANGE_V2,
 } from '@utils/constants';
+import { applyPositionMerge, applyPositionRedeem, applyPositionSplit } from '@utils/adapter-utils';
 
-/** Outcome ordering within a neg-risk question: every one is [Yes, No]. */
-const YES_INDEX = 0;
-const NO_INDEX = 1;
 /**
  * Addresses that can be `stakeholder` on a neg-risk split, merge or conversion
  * without owning the position.
@@ -34,12 +26,12 @@ const NO_INDEX = 1;
  * The subgraph filtered only `NEG_RISK_EXCHANGE` here, because the v2 exchange
  * and both adapter generations postdate it.
  */
-const NEG_RISK_LIFECYCLE_NON_OWNERS: string[] = [
+const NEG_RISK_LIFECYCLE_NON_OWNERS: ReadonlySet<string> = new Set<string>([
   NEG_RISK_EXCHANGE,
   NEG_RISK_EXCHANGE_V2,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V1,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V2,
-] as const;
+]);
 
 /**
  * Addresses that can be `redeemer` on a neg-risk redemption without owning the
@@ -49,11 +41,11 @@ const NEG_RISK_LIFECYCLE_NON_OWNERS: string[] = [
  * user's behalf: the payout reaches the wallet, so crediting the redeemer
  * invents a position that never existed.
  */
-const NEG_RISK_REDEEM_NON_OWNERS: string[] = [
+const NEG_RISK_REDEEM_NON_OWNERS: ReadonlySet<string> = new Set<string>([
   ...NEG_RISK_LIFECYCLE_NON_OWNERS,
   AUTO_REDEEMER,
   AUTO_REDEEMER_V1,
-] as const;
+]);
 
 /**
  * Split: collateral in, one outcome token per leg out.
@@ -64,24 +56,16 @@ const NEG_RISK_REDEEM_NON_OWNERS: string[] = [
 indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PositionSplit' },
   async ({ event, context }) => {
-    const conditionId = event.params.conditionId;
-    const positionIds = await getConditionPositionIds(context, conditionId);
-    if (!positionIds.length) return;
+    const wallet = event.params.stakeholder.toLowerCase();
+    if (NEG_RISK_LIFECYCLE_NON_OWNERS.has(wallet)) return;
 
-    if (NEG_RISK_LIFECYCLE_NON_OWNERS.includes(event.params.stakeholder.toLowerCase())) return;
-
-    const price = splitNegRiskPrice(positionIds.length);
-    for (const positionId of positionIds) {
-      await updateUserPositionWithBuy(
-        context,
-        event,
-        event.params.stakeholder,
-        positionId,
-        price,
-        event.params.amount,
-        conditionId,
-      );
-    }
+    await applyPositionSplit(
+      context,
+      event,
+      wallet,
+      event.params.conditionId.toLowerCase(),
+      event.params.amount,
+    );
   },
 );
 
@@ -92,125 +76,43 @@ indexer.onEvent(
 indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PositionsMerge' },
   async ({ event, context }) => {
-    if (NEG_RISK_LIFECYCLE_NON_OWNERS.includes(event.params.stakeholder.toLowerCase())) return;
+    const wallet = event.params.stakeholder.toLowerCase();
+    if (NEG_RISK_LIFECYCLE_NON_OWNERS.has(wallet)) return;
 
-    const conditionId = event.params.conditionId;
-    const positionIds = await getConditionPositionIds(context, conditionId);
-    if (!positionIds.length) return;
-
-    const price = splitNegRiskPrice(positionIds.length);
-    for (const positionId of positionIds) {
-      await updateUserPositionWithSell(
-        context,
-        event,
-        event.params.stakeholder,
-        positionId,
-        price,
-        event.params.amount,
-        conditionId,
-      );
-    }
+    await applyPositionMerge(
+      context,
+      event,
+      wallet,
+      event.params.conditionId.toLowerCase(),
+      event.params.amount,
+    );
   },
 );
 
 /**
  * Convert: surrender NO on the questions named by `indexSet`, receive YES on
- * the rest.
+ * the rest. Priced by applyNegRiskConversion, the routine the gen-2 collateral
+ * adapter's conversions use too, following the Data API: k >= 2 at fair value
+ * (NO out at (n-1)/n, YES in at 1/n), k = 1 carrying the NO cost into the YES
+ * legs. See negrisk-conversion-design.md.
  *
- * The NO legs are disposed of at their own average cost — a wash — and the YES
- * legs are acquired at the price that makes the conversion self-financing.
- * Both sides are counted against the event's question count, so a market whose
- * count is not established is skipped rather than guessed at: an undercount
- * would reject legitimate conversions and misprice every YES leg.
+ * A stakeholder that is an adapter or exchange is skipped: the adapter's own
+ * PositionsConverted names the real wallet and is booked from there.
  */
 indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PositionsConverted' },
   async ({ event, context }) => {
-    // Lower-cased once here: NegRiskEvent rows are keyed lower-case by both
-    // writers (MarketPrepared, QuestionPrepared), so the lookup below has to
-    // match, and getNegRiskPositionId hashes the same bytes either way.
-    const marketId = event.params.marketId.toLowerCase();
-    const indexSet = event.params.indexSet;
-    const stakeholder = event.params.stakeholder;
-    const amount = event.params.amount;
+    const wallet = event.params.stakeholder.toLowerCase();
+    if (NEG_RISK_LIFECYCLE_NON_OWNERS.has(wallet)) return;
 
-    if (NEG_RISK_LIFECYCLE_NON_OWNERS.includes(stakeholder.toLowerCase())) return;
-
-    const negRiskEvent = await context.NegRiskEvent.get(marketId);
-    if (negRiskEvent == null) {
-      return;
-    }
-    const questionCount = negRiskEvent.questionCount;
-    // TODO: to be removed once verified dead code in indexing
-    if (questionCount === 0 || indexSet >> BigInt(questionCount) !== 0n) {
-      context.log.warn(
-        `NegRisk market=${marketId} has the invalid number ${questionCount} of questions or indexSet: ${indexSet}`,
-      );
-      return;
-    }
-
-    let noCnt = 0;
-    let noPriceSum = 0n;
-
-    for (let i = 0; i < questionCount; i++) {
-      if (indexSetContains(indexSet, i)) {
-        noCnt++;
-        const positionId = getNegRiskPositionId(marketId, i, NO_INDEX);
-        const userPosition = await loadUserPosition(context, stakeholder, positionId);
-
-        await updateUserPositionWithSell(
-          context,
-          event,
-          stakeholder,
-          positionId,
-          userPosition.avgPrice,
-          amount,
-        );
-
-        noPriceSum += userPosition.avgPrice;
-      }
-    }
-    if (noCnt === 0) {
-      context.log.info(
-        `PositionsConverted resolved no NO legs: stakeholder=${stakeholder} ` +
-          `market=${marketId} indexSet=${indexSet} questions=${questionCount} ` +
-          `block=${event.block.number}`,
-      );
-      return;
-    }
-    if (noCnt >= questionCount) {
-      context.log.info(
-        `PositionsConverted covers all ${questionCount} questions, no YES legs to price: ` +
-          `stakeholder=${stakeholder} market=${marketId} indexSet=${indexSet} ` +
-          `block=${event.block.number}`,
-      );
-      return;
-    }
-
-    const noPrice = noPriceSum / BigInt(noCnt);
-    let yesPrice = computeNegRiskYesPrice(noPrice, noCnt, questionCount - noCnt);
-
-    // TODO: to be removed once verified dead code in indexing
-    if (yesPrice < 0n) {
-      context.log.warn(
-        `NegRisk market=${marketId} has the invalid yes price ${yesPrice}$. The total number of questions is ${questionCount} with ${noCnt} no price ${noPrice}`,
-      );
-      yesPrice = 0n;
-    }
-
-    for (let i = 0; i < questionCount; i++) {
-      if (!indexSetContains(indexSet, i)) {
-        const positionId = getNegRiskPositionId(marketId, i, YES_INDEX);
-        await updateUserPositionWithBuy(
-          context,
-          event,
-          event.params.stakeholder,
-          positionId,
-          yesPrice,
-          event.params.amount,
-        );
-      }
-    }
+    await applyNegRiskConversion(
+      context,
+      event,
+      wallet,
+      event.params.marketId.toLowerCase(),
+      event.params.indexSet,
+      event.params.amount,
+    );
   },
 );
 /**
@@ -222,36 +124,16 @@ indexer.onEvent(
 indexer.onEvent(
   { contract: 'NegRiskAdapter', event: 'PayoutRedemption' },
   async ({ event, context }) => {
-    const conditionId = event.params.conditionId;
-    const tokenIds = await getConditionPositionIds(context, conditionId);
-    if (!tokenIds.length) return;
+    const redeemer = event.params.redeemer.toLowerCase();
+    if (NEG_RISK_REDEEM_NON_OWNERS.has(redeemer)) return;
 
-    const amounts = event.params.amounts;
-    const redeemer = event.params.redeemer;
-
-    if (NEG_RISK_REDEEM_NON_OWNERS.includes(redeemer.toLowerCase())) return;
-
-    const prices = (await context.Condition.get(conditionId))?.payoutPrices;
-    if (!prices?.length) return;
-    if (tokenIds.length !== amounts.length) {
-      context.log.warn(
-        `Neg-risk redemption outcome mismatch: condition=${conditionId} ` +
-          `table=${tokenIds.length} chain=${amounts.length}`,
-      );
-    }
-
-    const outcomeCount = Math.min(tokenIds.length, amounts.length);
-    for (let outcomeIndex = 0; outcomeIndex < outcomeCount; outcomeIndex++) {
-      await updateUserPositionWithSell(
-        context,
-        event,
-        redeemer,
-        tokenIds[outcomeIndex],
-        prices[outcomeIndex],
-        amounts[outcomeIndex],
-        conditionId,
-      );
-    }
+    await applyPositionRedeem(
+      context,
+      event,
+      redeemer,
+      event.params.conditionId.toLowerCase(),
+      event.params.amounts,
+    );
   },
 );
 
