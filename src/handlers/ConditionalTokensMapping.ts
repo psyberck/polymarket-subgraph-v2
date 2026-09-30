@@ -1,12 +1,4 @@
-/**
- * Position lifecycle on the Gnosis ConditionalTokens contract: splits, merges,
- * redemptions, and the condition identity and settled prices they are priced
- * against.
- *
- * Rationale and measurements for every rule here live in
- * ../conditional-tokens-mapping.md. Comments below state WHAT a rule is; that
- * file holds why, with the numbers behind it.
- */
+/** CTF splits, merges and redemptions, plus condition identity and payouts. */
 
 import {
   AUTO_REDEEMER,
@@ -20,6 +12,7 @@ import {
   NEG_RISK_WRAPPED_COLLATERAL,
   PUSD_IMPLEMENTATION,
   PUSD_PROXY,
+  REDEMPTION_OPERATORS,
   USDC,
 } from '@utils/constants';
 import { type EvmOnEventContext, indexer } from 'envio';
@@ -30,17 +23,12 @@ import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 import { loadUserPosition } from '@utils/loadUserPosition';
 
-/** Collaterals the markets table already holds ids for; they need no
- *  OutcomeToken row for reverse lookup. */
+/** Collaterals the markets table covers; no OutcomeToken row needed. */
 const USDC_COLLATERAL: Set<string> = new Set([USDC, NEG_RISK_WRAPPED_COLLATERAL]);
 
 /**
- * Contracts that split or merge on a user's behalf, so their name in
- * `stakeholder` is an operator and not an owner. Each is booked elsewhere.
- *
- * Narrower than PROTOCOL_ADDRESSES in lib/store.ts, and load-bearing:
- * updateUserPositionWithBuy/Sell do not filter. The omissions rest on
- * measurement, not construction — see the doc before adding a call site.
+ * Split/merge operators, booked elsewhere. Load-bearing: the position
+ * updaters do not filter.
  */
 const SET_OPERATORS: ReadonlySet<string> = new Set<string>([
   CTF_COLLATERAL_ADAPTER_V1,
@@ -50,38 +38,27 @@ const SET_OPERATORS: ReadonlySet<string> = new Set<string>([
   NEG_RISK_EXCHANGE,
 ]);
 
-/** Contracts that redeem on a user's behalf: the set operators plus both
- *  auto-redeemers, which are booked from their own (AutoRedeemerMapping) events. */
+/** Redeem operators; auto-redeemers are booked in AutoRedeemerMapping. */
 const REDEEM_OPERATORS: ReadonlySet<string> = new Set<string>([
   ...SET_OPERATORS,
   AUTO_REDEEMER,
   AUTO_REDEEMER_V1,
+  ...REDEMPTION_OPERATORS,
 ]);
 
-/**
- * pUSD, skipped without deriving ids: a cash layer, not a CTF denomination.
- * Both entries are the same token and both appear as a collateralToken.
- *
- * NOTE this drops the NegligibleCollateralSkip counter that lib/collateral.ts
- * keeps on the handlers/ path — port it before this file goes live.
- */
+/** pUSD proxy and implementation; skipped, uncounted. */
 const PUSD_COLLATERALS: Set<string> = new Set([PUSD_PROXY, PUSD_IMPLEMENTATION]);
 
-/** An outcome token named by an index set, tagged with the outcome it is. */
+/** Outcome token and its index. */
 interface OutcomeToken {
   id: bigint;
   outcomeIndex: number;
 }
 
 /**
- * Outcome tokens named by `indexSets`, denominated in this event's collateral.
- * Ids outside the markets table get an OutcomeToken row so they stay reversible.
- *
- * CALLERS MUST PRICE BY `outcomeIndex`, never by position in this array:
- * `indexSets` is a subset on 14.3% of bookable redemptions, and pairing a payout
- * array positionally settles one outcome at another's price.
- *
- * Empty when the collateral is pUSD or the condition is unknown.
+ * Outcome tokens named by `indexSets` in this collateral; empty for pUSD or an
+ * unknown condition. Price by `outcomeIndex`, not array position: `indexSets`
+ * can be a subset.
  */
 async function getCollateralTokenIds(
   context: EvmOnEventContext,
@@ -108,7 +85,7 @@ async function getCollateralTokenIds(
     );
   }
 
-  // Bitmap over outcomes: bit i set means outcome i is in the set.
+  // Bit i set = outcome i.
   const indexSet2Outcomes = (indexSet: bigint): number[] => {
     const outcomes: number[] = [];
     for (let i = 0, rest = indexSet; rest > 0n; i++, rest >>= 1n) {
@@ -133,7 +110,7 @@ async function getCollateralTokenIds(
   return outcomeTokens;
 }
 
-// ── Split: collateral -> a full set of outcome tokens, each at 1/N ─
+// ── Split: each leg bought at 1/N ─────────────────────────────────
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'PositionSplit' },
   async ({ event, context }) => {
@@ -148,7 +125,6 @@ indexer.onEvent(
     );
     if (!tokens.length) return;
 
-    // 1/N of the collateral per leg, independent of which outcome a leg is.
     const price = splitNegRiskPrice(tokens.length);
 
     for (const token of tokens) {
@@ -165,7 +141,7 @@ indexer.onEvent(
   },
 );
 
-// ── Merge: the inverse of a split, same legs and same 1/N pricing ──
+// ── Merge: each leg sold at 1/N ───────────────────────────────────
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'PositionsMerge' },
   async ({ event, context }) => {
@@ -180,7 +156,6 @@ indexer.onEvent(
     );
     if (!tokens.length) return;
 
-    // 1/N of the collateral per leg, independent of which outcome a leg is.
     const price = splitNegRiskPrice(tokens.length);
 
     for (const token of tokens) {
@@ -197,7 +172,7 @@ indexer.onEvent(
   },
 );
 
-// ── Redemption: a resolved position closes at its settled price ────
+// ── Redemption: close at the settled price ────────────────────────
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'PayoutRedemption' },
   async ({ event, context }) => {
@@ -221,8 +196,6 @@ indexer.onEvent(
       return;
     }
 
-    // By outcomeIndex, NOT by position in `tokens` — see the doc. An outcome
-    // with no settled price is left open rather than closed at a made-up one.
     for (const token of tokens) {
       const price = prices[token.outcomeIndex];
       if (price === undefined) {
@@ -245,10 +218,7 @@ indexer.onEvent(
   },
 );
 
-// ── Condition identity: outcome count, and whether it is neg-risk ──
-//
-// Recorded so token ids can be DERIVED rather than looked up. `oracle` is the
-// only on-chain statement that a condition is neg-risk.
+// ── Preparation: outcome count and neg-risk flag (oracle) ─────────
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'ConditionPreparation' },
   async ({ event, context }) => {
@@ -269,10 +239,7 @@ indexer.onEvent(
   },
 );
 
-// ── Resolution: the settled price of every outcome, 1e6 ────────────
-//
-// Stored per condition so redemptions can price each leg individually; the
-// event's aggregate `payout` sums the legs and cannot separate them.
+// ── Resolution: per-outcome settled prices, 1e6 ───────────────────
 indexer.onEvent(
   { contract: 'ConditionalTokens', event: 'ConditionResolution' },
   async ({ event, context }) => {
@@ -287,10 +254,6 @@ indexer.onEvent(
       return;
     }
 
-    // The event is the authority on the outcome count, and it is free — no
-    // lookup, no RPC. Counted off the numerators so `prices` and the stored
-    // count come from one value; the cross-check catches the chain
-    // contradicting itself.
     const outcomeSlotCount = payoutNumerators.length;
     if (Number(event.params.outcomeSlotCount) !== outcomeSlotCount) {
       context.log.warn(
@@ -301,8 +264,6 @@ indexer.onEvent(
 
     const prices = payoutNumerators.map((n) => (n * COLLATERAL_SCALE) / payoutDenominator);
 
-    // A stored count that disagrees is WRONG: correct the row rather than
-    // truncating the prices to fit it.
     const stored = await context.Condition.get(conditionId);
     if (stored && stored.outcomeSlotCount !== outcomeSlotCount) {
       context.log.warn(
