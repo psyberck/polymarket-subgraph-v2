@@ -3,10 +3,14 @@ import { getAddress } from 'viem';
 import {
   AUTO_REDEEMER,
   AUTO_REDEEMER_V1,
+  COMBOS_EXCHANGE,
+  COMBOS_POSITION_MANAGER,
+  CONDITIONAL_TOKENS,
   CTF_COLLATERAL_ADAPTER_V1,
   CTF_COLLATERAL_ADAPTER_V2,
   EXCHANGE,
   EXCHANGE_V2,
+  EXCHANGE_V2_THIRD,
   FIFTY_CENTS,
   NEG_RISK_ADAPTER,
   NEG_RISK_CTF_COLLATERAL_ADAPTER_V1,
@@ -20,8 +24,14 @@ import {
 } from '@utils/constants';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
 import { loadUserPosition } from '@utils/loadUserPosition';
+import { updateUserPositionWithTransfer } from '@utils/updateUserPositionWithTransfer';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
+
+/**
+ * Book wallet-to-wallet transfers. Off unless `INDEX_INCLUDE_P2P_TRANSFERS=true`.
+ */
+const INCLUDE_P2P_TRANSFERS = process.env.INDEX_INCLUDE_P2P_TRANSFERS === 'true';
 
 const LEGACY_ADAPTERS = [CTF_COLLATERAL_ADAPTER_V1, NEG_RISK_CTF_COLLATERAL_ADAPTER_V1].map((a) =>
   getAddress(a),
@@ -50,6 +60,31 @@ const NON_WALLET_COUNTERPARTIES: ReadonlySet<string> = new Set<string>([
   NEG_RISK_EXCHANGE,
 ]);
 
+/** Addresses whose transfers another handler books, or that hold no position */
+const P2P_EXCLUDED: ReadonlySet<string> = new Set<string>([
+  ...NON_WALLET_COUNTERPARTIES,
+  ...ADAPTER_ADDRESS_SET,
+  ...REDEMPTION_OPERATOR_SET,
+  EXCHANGE_V2_THIRD,
+  COMBOS_EXCHANGE,
+  COMBOS_POSITION_MANAGER,
+  CONDITIONAL_TOKENS,
+]);
+
+const BLOCK_FILTER = { number: { _gte: V2_START_BLOCK + 1 } };
+
+/** Delivery filter */
+const TRANSFER_FILTERS = INCLUDE_P2P_TRANSFERS
+  ? { block: BLOCK_FILTER }
+  : {
+      params: [
+        { from: LEGACY_ADAPTERS },
+        { to: LEGACY_ADAPTERS },
+        { operator: REDEMPTION_OPERATOR_LIST },
+      ],
+      block: BLOCK_FILTER,
+    };
+
 /**
  * Price per leg, `1/N`. No conditionId assumes binary; a known condition
  * without an outcome count returns null.
@@ -70,11 +105,15 @@ async function getPrice(
 }
 
 /**
- * Book a gen-1 adapter transfer or a redemption operator's pull.
+ * Book a gen-1 adapter transfer, a redemption operator's pull, or (with
+ * `INCLUDE_P2P_TRANSFERS`) a wallet-to-wallet transfer.
  *
  * - adapter -> wallet: a buy at `1/N`; gen 1 emits no lifecycle events.
  * - wallet -> adapter: a sale at the settled price, else `1/N`.
- * - `REDEMPTION_OPERATORS` pull from a wallet: a sale at the settled price.
+ * - `REDEMPTION_OPERATORS` pull from a wallet: a sale at the settled price,
+ *   else the wallet's average.
+ * - wallet -> wallet: the sender sells as a pull does; the receiver acquires
+ *   the full value at that price, `totalBought` unchanged.
  *
  * @param context - handler context.
  * @param event - source transfer, for block/log ordering.
@@ -93,11 +132,19 @@ async function mutate(
   ids: readonly bigint[],
   values: readonly bigint[],
 ): Promise<void> {
-  const fromIsAdapter = ADAPTER_ADDRESS_SET.has(from.toLowerCase());
-  const toIsAdapter = ADAPTER_ADDRESS_SET.has(to.toLowerCase());
+  const sender = from.toLowerCase();
+  const recipient = to.toLowerCase();
   const op = operator.toLowerCase();
+
+  const fromIsAdapter = ADAPTER_ADDRESS_SET.has(sender);
+  const toIsAdapter = ADAPTER_ADDRESS_SET.has(recipient);
   const isPull = REDEMPTION_OPERATOR_SET.has(op) && !fromIsAdapter && !toIsAdapter;
-  if (!isPull && fromIsAdapter === toIsAdapter) return;
+  const isP2p =
+    INCLUDE_P2P_TRANSFERS &&
+    !isPull &&
+    sender !== recipient &&
+    ![op, sender, recipient].some((a) => P2P_EXCLUDED.has(a));
+  if (!isPull && !isP2p && fromIsAdapter === toIsAdapter) return;
 
   const wallet = fromIsAdapter ? to : from;
   const owner = wallet.toLowerCase();
@@ -133,12 +180,14 @@ async function mutate(
     let price: bigint;
     if (settledPrice !== undefined) {
       price = settledPrice;
-    } else if (isPull) {
+    } else if (isPull || isP2p) {
       price = (await loadUserPosition(context, owner, tokenId)).avgPrice;
-      context.log.warn(
-        `Redemption pull before market settlement, disposed at cost: ` +
-          `token=${tokenId} wallet=${wallet} block=${event.block.number}`,
-      );
+      if (isPull) {
+        context.log.warn(
+          `Redemption pull before market settlement, disposed at cost: ` +
+            `token=${tokenId} wallet=${wallet} block=${event.block.number}`,
+        );
+      }
     } else {
       const avgPrice = await getPrice(context, conditionId);
       if (avgPrice === null) {
@@ -153,6 +202,8 @@ async function mutate(
     }
 
     await updateUserPositionWithSell(context, event, wallet, tokenId, price, value, conditionId);
+    if (isP2p)
+      await updateUserPositionWithTransfer(context, event, to, tokenId, price, value, conditionId);
   }
 }
 
@@ -160,14 +211,7 @@ indexer.onEvent(
   {
     contract: 'ConditionalTokens',
     event: 'TransferSingle',
-    where: {
-      params: [
-        { from: LEGACY_ADAPTERS },
-        { to: LEGACY_ADAPTERS },
-        { operator: REDEMPTION_OPERATOR_LIST },
-      ],
-      block: { number: { _gte: V2_START_BLOCK + 1 } },
-    },
+    where: TRANSFER_FILTERS,
   },
   async ({ event, context }) => {
     await mutate(
@@ -186,14 +230,7 @@ indexer.onEvent(
   {
     contract: 'ConditionalTokens',
     event: 'TransferBatch',
-    where: {
-      params: [
-        { from: LEGACY_ADAPTERS },
-        { to: LEGACY_ADAPTERS },
-        { operator: REDEMPTION_OPERATOR_LIST },
-      ],
-      block: { number: { _gte: V2_START_BLOCK + 1 } },
-    },
+    where: TRANSFER_FILTERS,
   },
   async ({ event, context }) => {
     await mutate(

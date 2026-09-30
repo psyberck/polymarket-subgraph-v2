@@ -6,7 +6,7 @@
  * wallet, emitting BinaryRedemption / NegRiskRedemption(from, conditionId,
  * payout). Measured 2026-09-25 over 20,000 blocks, every CTF pull to a
  * redeemer (117,682) has one of these for the same wallet in the same tx, so
- * the redeemers are not in LegacyAdapterTransfersMapping's transfer inference.
+ * the redeemers are not in CtfTransfersMapping's transfer inference.
  *
  * AutoRedeemer's third event, Redemption(from, positionId, payout), is not
  * indexed: it redeems combo (parlay) positions held on Polymarket's separate
