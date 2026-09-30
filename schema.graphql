@@ -50,6 +50,11 @@ type Condition @storage(postgres: true) {
   payoutPrices: [BigInt!] # settled price per outcome, 1e6; null until resolved
 }
 
+type SplitMarker @storage(postgres: true) {
+  id: ID! # "{txHash}-{wallet}-{conditionId}", all lower-case
+  amount: BigInt! # split amount not yet consumed by a conversion, 1e6
+}
+
 type OutcomeToken @storage(postgres: true) {
   id: ID! # tokenId, decimal string
   conditionId: String!
