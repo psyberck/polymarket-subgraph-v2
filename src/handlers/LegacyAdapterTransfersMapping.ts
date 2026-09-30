@@ -14,10 +14,12 @@ import {
   NEG_RISK_ESCROW_SINK,
   NEG_RISK_EXCHANGE,
   NEG_RISK_EXCHANGE_V2,
+  REDEMPTION_OPERATORS,
   V2_START_BLOCK,
   ZERO_ADDRESS,
 } from '@utils/constants';
 import { splitNegRiskPrice } from '@utils/computeNegRiskYesPrice';
+import { loadUserPosition } from '@utils/loadUserPosition';
 import { updateUserPositionWithBuy } from '@utils/updateUserPositionWithBuy';
 import { updateUserPositionWithSell } from '@utils/updateUserPositionWithSell';
 
@@ -27,6 +29,11 @@ const LEGACY_ADAPTERS = [CTF_COLLATERAL_ADAPTER_V1, NEG_RISK_CTF_COLLATERAL_ADAP
 
 const ADAPTER_ADDRESS_SET: ReadonlySet<string> = new Set(
   LEGACY_ADAPTERS.map((a) => a.toLowerCase()),
+);
+
+const REDEMPTION_OPERATOR_LIST = REDEMPTION_OPERATORS.map((a) => getAddress(a));
+const REDEMPTION_OPERATOR_SET: ReadonlySet<string> = new Set(
+  REDEMPTION_OPERATORS.map((a) => a.toLowerCase()),
 );
 
 const NON_WALLET_COUNTERPARTIES: ReadonlySet<string> = new Set<string>([
@@ -44,16 +51,12 @@ const NON_WALLET_COUNTERPARTIES: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Acquisition price per leg: `1/N` of the collateral, N being the outcome count.
- *
- * Asymmetric on purpose. An unregistered token carries no conditionId, so N is
- * unknowable and this assumes binary; a token that IS registered but whose
- * condition is missing returns null, and the caller skips rather than guess.
+ * Price per leg, `1/N`. No conditionId assumes binary; a known condition
+ * without an outcome count returns null.
  *
  * @param context - handler context.
- * @param conditionId - the token's condition, or undefined when no
- *   `OutcomeToken` row exists for it.
- * @returns Price in 1e6 units, or null when the condition is unusable.
+ * @param conditionId - the token's condition; undefined if unregistered.
+ * @returns Price in 1e6, or null to skip.
  */
 async function getPrice(
   context: EvmOnEventContext,
@@ -67,23 +70,15 @@ async function getPrice(
 }
 
 /**
- * Book a wallet<->adapter ERC-1155 leg for the gen-1 collateral adapters.
+ * Book a gen-1 adapter transfer or a redemption operator's pull.
  *
- * Gen-1 emits no lifecycle events, so this transfer is the ONLY place the user
- * appears. Gen-2 is booked from its own PositionSplit/Merged/Redeemed instead.
- *
- * Direction picks the side: adapter -> wallet is an acquisition at `1/N`,
- * wallet -> adapter a disposal at the settled price once resolved, else `1/N`.
- * Settled legs read `payoutPrices[outcomeIndex]` -- by index, never by array
- * position -- and coalesce with `??`, so a losing leg's legitimate 0 is not
- * mistaken for "no price" and re-priced at 1/N.
- *
- * Returns early when both sides or neither are adapters, and when the
- * counterparty is a protocol address rather than an owner: booking those
- * invents a position for a contract that holds nothing.
+ * - adapter -> wallet: a buy at `1/N`; gen 1 emits no lifecycle events.
+ * - wallet -> adapter: a sale at the settled price, else `1/N`.
+ * - `REDEMPTION_OPERATORS` pull from a wallet: a sale at the settled price.
  *
  * @param context - handler context.
  * @param event - source transfer, for block/log ordering.
+ * @param operator - the transfer's operator.
  * @param from - sender.
  * @param to - recipient.
  * @param ids - ERC-1155 token ids; TransferSingle passes one element.
@@ -92,6 +87,7 @@ async function getPrice(
 async function mutate(
   context: EvmOnEventContext,
   event: EvmEvent,
+  operator: string,
   from: string,
   to: string,
   ids: readonly bigint[],
@@ -99,11 +95,13 @@ async function mutate(
 ): Promise<void> {
   const fromIsAdapter = ADAPTER_ADDRESS_SET.has(from.toLowerCase());
   const toIsAdapter = ADAPTER_ADDRESS_SET.has(to.toLowerCase());
-
-  if (fromIsAdapter === toIsAdapter) return;
+  const op = operator.toLowerCase();
+  const isPull = REDEMPTION_OPERATOR_SET.has(op) && !fromIsAdapter && !toIsAdapter;
+  if (!isPull && fromIsAdapter === toIsAdapter) return;
 
   const wallet = fromIsAdapter ? to : from;
-  if (NON_WALLET_COUNTERPARTIES.has(wallet.toLowerCase())) return;
+  const owner = wallet.toLowerCase();
+  if (NON_WALLET_COUNTERPARTIES.has(owner) || (isPull && owner === op)) return;
 
   for (let i = 0; i < ids.length; i++) {
     const value = values[i];
@@ -125,13 +123,25 @@ async function mutate(
         continue;
       }
       await updateUserPositionWithBuy(context, event, wallet, tokenId, price, value, conditionId);
-    } else {
-      const settled = token
-        ? (await context.Condition.get(token.conditionId))?.payoutPrices?.[token.outcomeIndex]
-        : undefined;
+      continue;
+    }
 
-      const settledPrice = settled ?? (await getPrice(context, conditionId));
-      if (settledPrice === null) {
+    const settledPrice = token
+      ? (await context.Condition.get(token.conditionId))?.payoutPrices?.[token.outcomeIndex]
+      : undefined;
+
+    let price: bigint;
+    if (settledPrice !== undefined) {
+      price = settledPrice;
+    } else if (isPull) {
+      price = (await loadUserPosition(context, owner, tokenId)).avgPrice;
+      context.log.warn(
+        `Redemption pull before market settlement, disposed at cost: ` +
+          `token=${tokenId} wallet=${wallet} block=${event.block.number}`,
+      );
+    } else {
+      const avgPrice = await getPrice(context, conditionId);
+      if (avgPrice === null) {
         context.log.warn(
           `Adapter surrender skipped, condition unknown: ` +
             `condition=${conditionId} token=${tokenId} wallet=${wallet} ` +
@@ -139,16 +149,10 @@ async function mutate(
         );
         continue;
       }
-      await updateUserPositionWithSell(
-        context,
-        event,
-        wallet,
-        tokenId,
-        settledPrice,
-        value,
-        conditionId,
-      );
+      price = avgPrice;
     }
+
+    await updateUserPositionWithSell(context, event, wallet, tokenId, price, value, conditionId);
   }
 }
 
@@ -157,7 +161,11 @@ indexer.onEvent(
     contract: 'ConditionalTokens',
     event: 'TransferSingle',
     where: {
-      params: [{ from: LEGACY_ADAPTERS }, { to: LEGACY_ADAPTERS }],
+      params: [
+        { from: LEGACY_ADAPTERS },
+        { to: LEGACY_ADAPTERS },
+        { operator: REDEMPTION_OPERATOR_LIST },
+      ],
       block: { number: { _gte: V2_START_BLOCK + 1 } },
     },
   },
@@ -165,6 +173,7 @@ indexer.onEvent(
     await mutate(
       context,
       event,
+      event.params.operator,
       event.params.from,
       event.params.to,
       [event.params.id],
@@ -178,7 +187,11 @@ indexer.onEvent(
     contract: 'ConditionalTokens',
     event: 'TransferBatch',
     where: {
-      params: [{ from: LEGACY_ADAPTERS }, { to: LEGACY_ADAPTERS }],
+      params: [
+        { from: LEGACY_ADAPTERS },
+        { to: LEGACY_ADAPTERS },
+        { operator: REDEMPTION_OPERATOR_LIST },
+      ],
       block: { number: { _gte: V2_START_BLOCK + 1 } },
     },
   },
@@ -186,6 +199,7 @@ indexer.onEvent(
     await mutate(
       context,
       event,
+      event.params.operator,
       event.params.from,
       event.params.to,
       event.params.ids,
