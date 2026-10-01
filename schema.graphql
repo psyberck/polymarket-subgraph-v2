@@ -5,8 +5,11 @@ type UserPosition @storage(postgres: true, clickhouse: true) {
   conditionId: String
 
   amount: BigInt! # current token balance, 1e6
-  avgPrice: BigInt! # volume-weighted entry price, 1e6 (0.42 -> 420000)
-  realizedPnl: BigInt! # realized on sells + redemptions, net of fees, 1e6
+  avgPrice: BigInt! # volume-weighted entry price, fee-exclusive, 1e6 (0.42 -> 420000)
+  avgFeePrice: BigInt! # buy fees per held token, 1e6; changes only on buys. A
+  # sale that closes the position folds it into avgPrice and resets it to 0
+  realizedPnl: BigInt! # realized on sells + redemptions, net of fees, 1e6;
+  # buy fees are charged here in full at purchase, as the Data API does
   feesPaid: BigInt! # cumulative OrderFilled fees, 1e6
   totalBought: BigInt! # cumulative outcome TOKENS bought, 1e6 (not USDC —
   # verified against res/positions/2026-05.parquet, where the subgraph's
