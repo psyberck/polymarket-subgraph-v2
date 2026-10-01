@@ -7,7 +7,7 @@ export const pool = new Pool({
   database: process.env.ENVIO_PG_DATABASE ?? 'envio-dev',
   password: process.env.ENVIO_PG_PASSWORD ?? 'testing',
   ssl: process.env.ENVIO_PG_HOST
-    ? { rejectUnauthorized: (process.env.ENVIO_PG_SSLMODE ?? 'require') === 'verify-full' }
+    ? { rejectUnauthorized: (process.env.ENVIO_PG_SSL_MODE ?? 'require') === 'verify-full' }
     : undefined,
   connectionTimeoutMillis: 15_000,
   max: 4,
