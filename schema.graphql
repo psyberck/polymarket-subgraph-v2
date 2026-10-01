@@ -8,8 +8,9 @@ type UserPosition @storage(postgres: true, clickhouse: true) {
   avgPrice: BigInt! # volume-weighted entry price, fee-exclusive, 1e6 (0.42 -> 420000)
   avgFeePrice: BigInt! # buy fees per held token, 1e6; changes only on buys. A
   # sale that closes the position folds it into avgPrice and resets it to 0
-  realizedPnl: BigInt! # realized on sells + redemptions, net of fees, 1e6;
-  # buy fees are charged here in full at purchase, as the Data API does
+  realizedPnl: BigInt! # realized on sells + redemptions, 1e6; net of sell fees
+  # and of the buy fees on tokens disposed of. The Data API also charges the
+  # held tokens' fees (avgFeePrice * amount) once the market resolves
   feesPaid: BigInt! # cumulative OrderFilled fees, 1e6
   totalBought: BigInt! # cumulative outcome TOKENS bought, 1e6 (not USDC —
   # verified against res/positions/2026-05.parquet, where the subgraph's

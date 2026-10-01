@@ -181,7 +181,8 @@ async function mutate(
     if (settledPrice !== undefined) {
       price = settledPrice;
     } else if (isPull || isP2p) {
-      price = (await loadUserPosition(context, owner, tokenId)).avgPrice;
+      const position = await loadUserPosition(context, owner, tokenId);
+      price = position.avgPrice + position.avgFeePrice;
       if (isPull) {
         context.log.warn(
           `Redemption pull before market settlement, disposed at cost: ` +
