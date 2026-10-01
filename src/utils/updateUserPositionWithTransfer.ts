@@ -3,7 +3,8 @@ import { loadUserPosition } from '@utils/loadUserPosition';
 
 /**
  * Book tokens received by transfer: a buy with no fee that leaves `totalBought`
- * alone, which is how the Data API shows a receiver.
+ * alone, which is how the Data API shows a receiver. The received tokens carry
+ * no fee, so `avgFeePrice` is diluted; the API's receiver fee is unmeasured.
  *
  * @param context - Handler context; writes go through it.
  * @param event - The transfer; only its block/log position is used.
@@ -32,6 +33,7 @@ const updateUserPositionWithTransfer = async (
     conditionId: userPosition.conditionId ?? conditionId,
     amount: held,
     avgPrice: (userPosition.avgPrice * userPosition.amount + price * amount) / held,
+    avgFeePrice: (userPosition.avgFeePrice * userPosition.amount) / held,
     lastBlock: event.block.number,
     lastLogIndex: event.logIndex,
     lastUpdatedAt: event.block.timestamp,

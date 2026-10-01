@@ -3,24 +3,18 @@ import { COLLATERAL_SCALE } from '@utils/constants';
 import { loadUserPosition } from '@utils/loadUserPosition';
 
 /**
- * Book a sell: realize PnL against the running average cost, reduce the balance.
+ * Book a sell at average cost: realize PnL against the fee-exclusive
+ * `avgPrice` minus the fee, and reduce `amount`. Averages and `totalBought`
+ * stay put. Capped at the balance; a zero balance writes nothing.
  *
- * - `avgPrice` and `totalBought` stay put -- average-cost, not FIFO, as the
- *   reference subgraph and Polymarket's API both do.
- * - Capped at the balance held: tokens acquired before the indexed range, or by
- *   a plain ERC-1155 transfer, would otherwise realize against basis never paid.
- *   Capping under-reports; those surface as `amount == 0 && realizedPnl == 0`.
- * - The fee reduces proceeds, not basis -- the buy leg capitalises it instead.
- * - Zero tokens, or a zero balance, writes nothing at all, not even the fee.
- *
- * @param context - Handler context; writes go through it.
- * @param event - The fill; only its block/log position is used.
- * @param user - Wallet address, any case; lower-cased here.
- * @param positionId - ERC-1155 outcome token id, stored as `tokenId`.
- * @param price - Fill price, 1e6 (0.42 -> 420000).
- * @param amount - TOKENS disposed of, 1e6; capped at the balance.
- * @param conditionId - Optional; a fill learns it only when Gamma metadata lands.
- * @param fee - Fee, 1e6 USDC; charged against PnL and kept in `feesPaid`.
+ * @param context - Handler context.
+ * @param event - Source event; stamps block/log position.
+ * @param user - Wallet, any case.
+ * @param positionId - Outcome token id.
+ * @param price - Price, 1e6.
+ * @param amount - Tokens sold, 1e6.
+ * @param conditionId - Used only if the row has none yet.
+ * @param fee - Fee, 1e6 USDC.
  */
 const updateUserPositionWithSell = async (
   context: EvmOnEventContext,
@@ -40,14 +34,17 @@ const updateUserPositionWithSell = async (
 
   const sold = amount > userPosition.amount ? userPosition.amount : amount;
   const deltaPnl = (sold * (price - userPosition.avgPrice)) / COLLATERAL_SCALE - fee;
+  const left = userPosition.amount - sold;
+  const closed = left === 0n;
 
   context.UserPosition.set({
     id: userPosition.id,
     user: address,
     tokenId: positionId,
     conditionId: userPosition.conditionId ?? conditionId,
-    amount: userPosition.amount - sold,
-    avgPrice: userPosition.avgPrice,
+    amount: left,
+    avgPrice: closed ? userPosition.avgPrice + userPosition.avgFeePrice : userPosition.avgPrice,
+    avgFeePrice: closed ? 0n : userPosition.avgFeePrice,
     realizedPnl: userPosition.realizedPnl + deltaPnl,
     feesPaid: userPosition.feesPaid + fee,
     totalBought: userPosition.totalBought,
