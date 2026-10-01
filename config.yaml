@@ -2,69 +2,35 @@
 name: polymarket-indexer
 description: Polymarket indexer of UserPositions, OrderFilled subgraphs.
 
-# Postgres is the primary store; ClickHouse mirrors the entities marked
-# @storage(clickhouse: true) in schema.graphql. The ClickHouse copy is what
-# fetch_positions.py reads — it replaces polymarket.user_positions in
-# CryptoHouse when Polymarket migrated to v2 contracts and retired subgraphs.
+# Postgres is primary; ClickHouse mirrors @storage(clickhouse: true) entities
 storage:
   postgres: true
   clickhouse: true
 
 contracts:
   # ── CTF Exchange V2 ───────────────────────────────────────────────
-  # OrderFilled only. OrdersMatched is a higher-level summary of the same
-  # taker activity — indexing both would double-count every trade.
+  # OrderFilled only; OrdersMatched summarizes the same fills (double-count).
   - name: CTFExchangeV2
     events:
       - event: 'OrderFilled(bytes32 indexed orderHash, address indexed maker, address indexed taker, uint8 side, uint256 tokenId, uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee, bytes32 builder, bytes32 metadata)'
 
   # ── Position lifecycle: standard markets ───────────────────────────
-  # Splits and merges move token balances without a trade; redemptions
-  # realize PnL at byResolution. All three must be folded in or cost basis
-  # drifts from Polymarket's own accounting.
-  #
-  # These land on the Gnosis ConditionalTokens contract, NOT on Polymarket's
-  # CtfCollateralAdapter — verified on-chain: ConditionalTokens emits ~1,300
-  # PositionSplit per 50 blocks at head, while the adapter emits zero. The
-  # adapter address is listed alongside it because its event signatures are
-  # identical, so if Polymarket ever routes lifecycle events through it the
-  # same handler picks them up with no code change.
+  # Split/merge/redeem must be folded in or cost basis drifts. They are
+  # emitted by Gnosis ConditionalTokens; the gen-1 adapter shares the same
+  # signatures and is listed too in case events are ever routed through it.
   - name: ConditionalTokens
     events:
       - event: 'ConditionPreparation(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount)'
-      # Resolution payouts. Redemptions are priced from these per-outcome
-      # numerators instead of the redemption's aggregate `payout`, which cannot
-      # tell a winning leg from a losing one when a wallet holds both. Same
-      # address as the lifecycle events below, so this widens a topic filter
-      # rather than adding an RPC round trip.
       - event: 'ConditionResolution(bytes32 indexed conditionId, address indexed oracle, bytes32 indexed questionId, uint256 outcomeSlotCount, uint256[] payoutNumerators)'
       - event: 'PositionSplit(address indexed stakeholder, address collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint256[] partition, uint256 amount)'
       - event: 'PositionsMerge(address indexed stakeholder, address collateralToken, bytes32 indexed parentCollectionId, bytes32 indexed conditionId, uint256[] partition, uint256 amount)'
       - event: 'PayoutRedemption(address indexed redeemer, address indexed collateralToken, bytes32 indexed parentCollectionId, bytes32 conditionId, uint256[] indexSets, uint256 payout)'
-      # ERC-1155 movements, narrowed by a `where` filter to flows in or out of
-      # the V2 collateral adapters (see handlers/AdapterTransfers.ts).
-      #
-      # This is how V2 split/merge/redeem activity gets attributed to a user at
-      # all: measured over blocks 86,226,978-86,227,478, 16,391 of 20,750
-      # PositionSplit events name the CtfCollateralAdapter as stakeholder and
-      # 4,246 name the NegRiskAdapter — only ~1% name a real wallet. The
-      # user-facing leg is the ERC-1155 transfer between wallet and adapter.
-      #
-      # COST: the from/to topic filter matches 44,671 logs per 500 blocks, of
-      # which 2,838 (6%) have a non-protocol counterparty and are booked; the
-      # rest are adapter<->exchange settlement hops discarded in the handler.
-      # Log payload per range roughly triples, and payload size is what caps
-      # throughput past ~1000 blocks. Worth re-measuring before the full
-      # backfill.
       - event: 'TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)'
       - event: 'TransferBatch(address indexed operator, address indexed from, address indexed to, uint256[] ids, uint256[] values)'
 
   # ── Position lifecycle: neg-risk markets ───────────────────────────
-  # Neg-risk (multi-candidate) markets keep their own adapter, which SURVIVED
-  # the v2 migration and is still live — ~460 logs per 50 blocks at head.
-  # Its event signatures are DIFFERENT from ConditionalTokens (no partition,
-  # no collateralToken), so they hash to different topics and need their own
-  # handler. Missing this would silently corrupt every neg-risk position.
+  # Still live after v2. Signatures differ from ConditionalTokens, so these
+  # need their own handlers; missing them corrupts every neg-risk position.
   - name: NegRiskAdapter
     events:
       - event: 'PositionSplit(address indexed stakeholder, bytes32 indexed conditionId, uint256 amount)'
@@ -73,125 +39,44 @@ contracts:
       - event: 'PositionsConverted(address indexed stakeholder, bytes32 indexed marketId, uint256 indexed indexSet, uint256 amount)'
       - event: 'MarketPrepared(bytes32 indexed marketId, address indexed oracle, uint256 feeBips, bytes data)'
       - event: 'QuestionPrepared(bytes32 indexed marketId, bytes32 indexed questionId, uint256 index, bytes data)'
+  - name: NegRiskCtfCollateralAdapter
+    events:
+      - event: 'PositionSplit(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+        field_selection:
+          transaction_fields:
+            - hash
+      - event: 'PositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+      - event: 'PositionsConverted(address indexed initiator, bytes32 indexed marketId, uint256 indexed indexSet, uint256 amount, uint256 amountOut)'
+        field_selection:
+          transaction_fields:
+            - hash
+      - event: 'PositionsRedeemed(address indexed initiator, bytes32 indexed conditionId, uint256[] amounts, uint256 payout)'
 
-# ── Required runtime tuning ────────────────────────────────────────
-#
-# These are environment variables rather than config keys, but the indexer does
-# not work on this chain without them. Measured on the 2026-04-28 window.
-#
-#   ENVIO_INDEXING_MAX_BUFFER_SIZE=20000
-#     Envio has NO default for this (an S.option in src/Env.res.mjs), so the
-#     fetcher runs unbounded ahead of processing. At ~45,000 logs per 500 blocks
-#     it reached 3,499 blocks ahead of a processor doing 855, buffered several
-#     hundred thousand events, and wedged Node in GC thrash at 100% CPU with
-#     zero forward progress. Bounding it made fetch and process run in lockstep
-#     and dropped CPU from 98.8% to 6.1%.
-#
-#   ENVIO_IN_MEMORY_OBJECTS_TARGET=1000000
-#     Must exceed the live UserPosition count or throughput decays as the entity
-#     store outgrows it — every mutatePosition miss becomes a Postgres round
-#     trip. Set to 50,000 against a 673,390-row working set, throughput fell
-#     from 403 to 332 blk/min over 50 minutes and kept sliding. This window
-#     produces ~750k positions; size it above whatever the window will hold.
-#
-#   ENVIO_MAX_CHAIN_CONCURRENCY=3
-#     Requires scripts/patch_envio_concurrency.mjs — the value is the hardcoded
-#     literal 100 in src/Env.res.mjs with no env override. Only needed when the
-#     RPC endpoint cannot serve 100 concurrent eth_getLogs; see the rpc note
-#     below and scripts/rpc_proxy.mjs.
+  # ── Standard-market collateral adapter ──────────────────────
+  # Its own events cover all wallet<->adapter transfers, so it is booked from these, not from transfers.
+  - name: CtfCollateralAdapter
+    events:
+      - event: 'PositionSplit(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+      - event: 'PositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+      - event: 'PositionsRedeemed(address indexed initiator, bytes32 indexed conditionId, uint256[] amounts, uint256 payout)'
+
+  # ── Auto-redeemers ─────────────────────────────────────────────────
+  # Each CTF pull to a redeemer has one of these naming the wallet in the same
+  # tx. Redemption(from, positionId, payout) is skipped: it redeems combo
+  # positions on PositionManager, not CTF (see AutoRedeemerMapping.ts).
+  - name: AutoRedeemer
+    events:
+      - event: 'BinaryRedemption(address indexed from, bytes32 indexed conditionId, uint256 payout)'
+      - event: 'NegRiskRedemption(address indexed from, bytes32 indexed conditionId, uint256 payout)'
 
 chains:
   - id: 137 # Polygon
-    # ── BOUNDED VALIDATION RUN — revert before the real backfill ──────
-    # Starts at the v2 cutover (2026-04-28 11:00 UTC) and ends just past
-    # the 2026-05.parquet snapshot block (86,236,778) so the two sources
-    # can be compared at the same point in time.
-    # For production: start_block 84902320 (PolyUSD deployment), no end_block.
-    # RECENT WINDOW, running to head. Reaching head is what makes
-    # scripts/reconcile.py valid at all: the Data API reports CURRENT lifetime
-    # state and offers no point-in-time query, so an index that stops in the
-    # past diverges on realizedPnl for reasons that are not bugs. A window that
-    # ends at head can be compared honestly for any position opened inside it.
-    #
-    # For the full v2 dataset the scoring pipeline needs, use 86126978 (the v2
-    # cutover) or 84902320 (PolyUSD deployment) instead — ~6.3M and ~7.5M
-    # blocks, on the order of two weeks each on this endpoint.
-    # ── ONE-WEEK BOUNDED RUN (2026-09-07) ────────────────────────────
-    # Exactly 7.0000 days, both bounds pinned by block timestamp rather than by
-    # an assumed block time -- Polygon is at 1.500 s/block here, so a week is
-    # 403,196 blocks and the 302,400 a 2 s assumption would give lands ~28 h
-    # short.
-    #
-    #   92970377   2026-08-31T07:16:33Z
-    #   93373573   2026-09-07T07:16:33Z
-    #
-    # start_block stays pinned so the comparable set is well defined: positions
-    # opened before it carry unknown opening balances, so reconcile.py and
-    # sweep_reconcile.py must both be given --start-block 92970377 -- see
-    # reconcile.py's docstring on why absolute values cannot agree otherwise.
-    start_block: 92970377
-    # end_block REMOVED 2026-09-08 to follow the chain to head.
-    #
-    # A pinned end_block makes the Data API comparison meaningless: the API
-    # reports CURRENT lifetime state with no point-in-time query, so once the
-    # window closes every position that keeps trading diverges for reasons that
-    # are not bugs. Measured on the 93,373,573 run -- read ~20 h after it closed,
-    # 98.5% of the 19,463 "size" divergences were our value matching the on-chain
-    # balance at end_block exactly, i.e. entirely time skew.
-    #
-    # Restore a pinned end_block only for a reproducible re-index, never for a
-    # run that will be reconciled against the API.
-    #
-    # ~6.3M blocks from the v2 cutover to head. At the ~340 blk/min this
-    # endpoint sustains that is on the order of two weeks — the limit is RPC
-    # capacity, not processing. An endpoint without the 4-concurrent cap that
-    # scripts/rpc_proxy.mjs exists to work around would cut it substantially.
-
-    # RPC is the sole data source by design — HyperSync is not used and no
-    # ENVIO_API_TOKEN is required.
-    #
-    # It was originally a workaround (*.hypersync.xyz is blocked on this
-    # network: TCP connects, then the TLS handshake resets right after Client
-    # Hello — an SNI-filtering firewall). It stayed because HyperSync buys us
-    # nothing here: we removed `field_selection` so there are no inline
-    # transaction fields to gain, start blocks are explicit so there is no
-    # auto-skip to gain, and Tenderly already fetches at 259 blk/s while the
-    # indexer only processes at 5-20 blk/s. The bottleneck is mutatePosition,
-    # not the network. Revisit HyperSync only if processing is optimized past
-    # ~250 blk/s.
+    start_block: 85050370
     rpc:
-      # Pointed at scripts/rpc_proxy.mjs, NOT straight at Tenderly. The
-      # endpoint serves this workload fine sequentially (~250 blk/s) but
-      # rejects JSON-RPC batches of 5+ and 429s under concurrency, and envio
-      # fires up to Env.maxChainConcurrency in-flight queries — the hardcoded
-      # literal 100 in node_modules/envio/src/Env.res.mjs, with no env
-      # override.
-      #
-      # The fatal part is not the 429 itself: envio reads a 429 as "range too
-      # big", halves the block interval, and never grows it back under
-      # sustained throttling. Measured collapse: 48 blocks in ~4 minutes
-      # against a 110,000-block window. Exactly the drpc failure described
-      # above, from a different cause.
-      #
-      # The proxy caps concurrency, queues, splits oversized batches, and
-      # retries 429s itself so envio only ever sees latency. Start it first:
-      #   node scripts/rpc_proxy.mjs
-      # With an endpoint that has real headroom, revert this to
-      # https://polygon.gateway.tenderly.co and skip the proxy.
+      # Upstream is PROXY_UPSTREAM (default Tenderly). Point url straight at
+      # an endpoint with real headroom to skip the proxy.
       url: http://127.0.0.1:8546
       for: sync
-      # Measured throughput by span (3 samples each, topic-filtered, 6 addrs):
-      #    500 blk -> 2.3s   7k logs  217 blk/s
-      #   1000 blk -> 3.9s  27k logs  259 blk/s   <- sweet spot
-      #   2000 blk -> 49s  229k logs   41 blk/s
-      #   4000 blk -> 62s  756k logs   65 blk/s
-      # Past ~1000 blocks the response payload dominates and throughput
-      # collapses, so cap there rather than letting it accelerate.
-      #
-      # Tenderly serves archive data and imposes no result cap at this size —
-      # a 5,000-block span returned 448,086 logs. drpc, by contrast, capped at
-      # 10,000 results (~100 blocks) and then rate-limited outright at
-      # 1.4 blk/s. This endpoint is ~180x faster.
       initial_block_interval: 500
       interval_ceiling: 1000
       query_timeout_millis: 120000
@@ -204,14 +89,17 @@ chains:
       - name: ConditionalTokens
         address:
           - 0x4d97dcd97ec945f40cf65f87097ace5ea0476045 # Gnosis CTF — live
-          # Collateral adapters, both generations. Same ABI, and dormant as
-          # emitters — they matter as the from/to of CT transfers (see
-          # handlers/AdapterTransfers.ts). Gen 2 replaced gen 1 between 2026-04
-          # and 2026-08; a backfill spanning that swap needs both, or lifecycle
-          # attribution silently stops. Run scripts/check_addresses.py to catch
-          # the next redeploy.
           - 0xada100874d00e3331d00f2007a9c336a65009718 # CtfCollateralAdapter gen 1
-          - 0xada100db00ca00073811820692005400218fce1f # CtfCollateralAdapter gen 2
       - name: NegRiskAdapter
         address:
           - 0xd91e80cf2e7be2e162c6513ced06f1dd0da35296
+      - name: NegRiskCtfCollateralAdapter
+        address:
+          - 0xada2005600dec949baf300f4c6120000bdb6eaab
+      - name: CtfCollateralAdapter
+        address:
+          - 0xada100db00ca00073811820692005400218fce1f
+      - name: AutoRedeemer
+        address:
+          - 0xa1200000d0002264c9a1698e001292d00e1b00af
+          - 0xf3cfb6a6ebfeb51876289eb235719eb1c65252b0
