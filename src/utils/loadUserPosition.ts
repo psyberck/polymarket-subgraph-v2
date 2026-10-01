@@ -4,7 +4,8 @@ import { getUserPositionEntityId } from '@utils/getUserPositionEntityId';
 /**
  * A wallet's position in a token, or a zero-valued one (not persisted) if it
  * has none. `last*` fields default to 0, not a real block. `realizedPnl` is
- * already net of fees.
+ * net of sell fees and of disposed tokens' buy fees; held tokens' buy fees
+ * (`avgFeePrice * amount`) are charged by readers once the market resolves.
  *
  * @param context - Handler context.
  * @param user - Wallet, any case.

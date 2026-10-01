@@ -4,8 +4,8 @@ import { loadUserPosition } from '@utils/loadUserPosition';
 
 /**
  * Book a buy: blend `avgPrice` (fee-exclusive) and `avgFeePrice`, add to
- * `amount` and `totalBought` (tokens, not USDC), and charge the fee to
- * `realizedPnl` up front.
+ * `amount` and `totalBought` (tokens, not USDC). The fee reaches `realizedPnl`
+ * as tokens are sold, and the rest at resolution.
  *
  * @param context - Handler context.
  * @param event - Source event; stamps block/log position.
@@ -43,7 +43,7 @@ const updateUserPositionWithBuy = async (
     amount: held,
     avgPrice,
     avgFeePrice,
-    realizedPnl: userPosition.realizedPnl - fee,
+    realizedPnl: userPosition.realizedPnl,
     feesPaid: userPosition.feesPaid + fee,
     totalBought: userPosition.totalBought + amount,
     lastBlock: event.block.number,

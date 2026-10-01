@@ -3,9 +3,11 @@ import { COLLATERAL_SCALE } from '@utils/constants';
 import { loadUserPosition } from '@utils/loadUserPosition';
 
 /**
- * Book a sell at average cost: realize PnL against the fee-exclusive
- * `avgPrice` minus the fee, and reduce `amount`. Averages and `totalBought`
- * stay put. Capped at the balance; a zero balance writes nothing.
+ * Book a sell at average cost: realize PnL against the fee-inclusive cost
+ * `avgPrice + avgFeePrice`, so the sold part's buy fees are charged, less the
+ * sell fee; reduce `amount`. Averages and `totalBought` stay put. Closing the
+ * position folds `avgFeePrice` into `avgPrice`. Capped at the balance; a zero
+ * balance writes nothing.
  *
  * @param context - Handler context.
  * @param event - Source event; stamps block/log position.
@@ -33,7 +35,8 @@ const updateUserPositionWithSell = async (
   if (userPosition.amount <= 0n) return;
 
   const sold = amount > userPosition.amount ? userPosition.amount : amount;
-  const deltaPnl = (sold * (price - userPosition.avgPrice)) / COLLATERAL_SCALE - fee;
+  const cost = userPosition.avgPrice + userPosition.avgFeePrice;
+  const deltaPnl = (sold * (price - cost)) / COLLATERAL_SCALE - fee;
   const left = userPosition.amount - sold;
   const closed = left === 0n;
 
@@ -43,7 +46,7 @@ const updateUserPositionWithSell = async (
     tokenId: positionId,
     conditionId: userPosition.conditionId ?? conditionId,
     amount: left,
-    avgPrice: closed ? userPosition.avgPrice + userPosition.avgFeePrice : userPosition.avgPrice,
+    avgPrice: closed ? cost : userPosition.avgPrice,
     avgFeePrice: closed ? 0n : userPosition.avgFeePrice,
     realizedPnl: userPosition.realizedPnl + deltaPnl,
     feesPaid: userPosition.feesPaid + fee,
