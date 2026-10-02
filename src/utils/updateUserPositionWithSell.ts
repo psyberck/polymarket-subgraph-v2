@@ -2,6 +2,9 @@ import type { EvmEvent, EvmOnEventContext } from 'envio';
 import { COLLATERAL_SCALE } from '@utils/constants';
 import { loadUserPosition } from '@utils/loadUserPosition';
 
+/** 0.1 tokens. */
+const CLOSED_POSITION_DUST = COLLATERAL_SCALE / 10n;
+
 /**
  * Book a sell at average cost: realize PnL against the fee-inclusive cost
  * `avgPrice + avgFeePrice`, so the sold part's buy fees are charged, less the
@@ -38,7 +41,7 @@ const updateUserPositionWithSell = async (
   const cost = userPosition.avgPrice + userPosition.avgFeePrice;
   const deltaPnl = (sold * (price - cost)) / COLLATERAL_SCALE - fee;
   const left = userPosition.amount - sold;
-  const closed = left === 0n;
+  const closed = left < CLOSED_POSITION_DUST;
 
   context.UserPosition.set({
     id: userPosition.id,
