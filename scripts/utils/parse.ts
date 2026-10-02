@@ -2,14 +2,11 @@ import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '../../src/u
 import { computePositionId } from '../../src/utils/ctf-utils.ts';
 import { pool } from './postgres.ts';
 
-/**
- * Batch size
- */
+/** Max rows per INSERT. */
 export const INSERT_BATCH = 10_000;
 
-/** Column order must match the TSV writers above. A mismatch is SILENT:
- *  Postgres reads questionIndex into outcomeSlotCount happily, both being
- *  integers. */
+/** Must match the order of values passed to `write`. A mismatch is SILENT when
+ *  types agree (e.g. questionIndex into outcomeSlotCount). */
 export const CONDITION_COLS = [
   'id',
   'outcomeSlotCount',
@@ -23,12 +20,7 @@ export const TOKEN_COLS = ['id', 'conditionId', 'outcomeIndex', 'collateral'];
 
 export const NEGRISK_COLS = ['id', 'questionCount'];
 
-/**
- * A value bound as an INSERT parameter.
- *
- * `string[]` is for text[] columns -- node-postgres serialises a JS array into a
- * Postgres array literal, which a joined string would not be.
- */
+/** An INSERT parameter. `string[]` binds to text[] columns as a Postgres array. */
 export type Val = string | number | boolean | string[] | null;
 
 /** A batched INSERT sink. `flush` sends what is buffered without closing it. */
@@ -38,9 +30,7 @@ export interface Inserter {
   close: () => Promise<void>;
 }
 
-/**
- * Sink Status
- */
+/** Counters for one rebuild. */
 export interface SinkStats {
   lines: number;
   parsed: number;
@@ -51,18 +41,14 @@ export interface SinkStats {
   gateBadTs: number;
   gateAfter: number;
   pricedGated: number;
+  unResolved: number;
   deferred: number;
   idMismatch: number;
   chainPriced: number;
   conditions: number;
 }
 
-/**
- * Zeroed counters for one rebuild.
- *
- * @returns Fresh stats. Pure -- it opens no database resource, so it is safe to
- *   construct outside a run.
- */
+/** Zeroed SinkStats. Pure; safe to call outside a run. */
 export const createSinkStats = (): SinkStats => ({
   lines: 0,
   parsed: 0,
@@ -73,6 +59,7 @@ export const createSinkStats = (): SinkStats => ({
   gateBadTs: 0,
   gateAfter: 0,
   pricedGated: 0,
+  unResolved: 0,
   deferred: 0,
   idMismatch: 0,
   chainPriced: 0,
@@ -92,14 +79,10 @@ export interface Market {
 }
 
 /**
- * A Gamma field that holds JSON *inside* a string.
+ * Decodes a Gamma field holding a JSON array as a string (`outcomes`,
+ * `clobTokenIds`, `outcomePrices`). Never throws: malformed values are common.
  *
- * `outcomes`, `clobTokenIds` and `outcomePrices` all arrive as encoded text
- * rather than arrays, and malformed ones are common enough that throwing would
- * end a 12 GB pass over one bad market.
- *
- * @param v - the raw field.
- * @returns Its elements, or [] if absent, unparseable, or not an array.
+ * @returns The elements, or [] if absent, unparseable, or not an array.
  */
 export const jsonArray = (v: unknown): string[] => {
   if (typeof v !== 'string') return [];
@@ -112,20 +95,12 @@ export const jsonArray = (v: unknown): string[] => {
 };
 
 /**
- * Settled prices, or null when `outcomePrices` is not a settlement.
+ * Micro-unit payout prices, or null if `outcomePrices` is not a settlement.
  *
- * It also carries LIVE QUOTES: a closed 2021 market returns
- * ["0.0000004113679809846114013590098187297978", "0.9999995886..."] -- an AMM
- * price, not a payout -- and taking it would book a redemption at a market quote.
- *
- * The discriminator is exactness. A settlement is a clean ratio of the payout
- * numerators, so in micro-units every entry is an INTEGER and the vector sums to
- * exactly 1e6; ["0","1"] and ["0.5","0.5"] pass, the quote above does not. Same
- * invariant `payout_sum` checks after the fact, applied before the row exists.
- *
- * @param raw - decoded `outcomePrices`.
- * @returns Micro-unit prices, or null. No reason accompanies a rejection because
- *   every one of them is deferred to a ConditionResolution read.
+ * `outcomePrices` can hold live AMM quotes (e.g. ["0.00000041...", "0.99999958..."]).
+ * A settlement is exact: every entry is an integer in micro-units and they sum to
+ * exactly 1e6, so ["0","1"] and ["0.5","0.5"] pass and quotes do not.
+ * Rejections are deferred to a ConditionResolution read.
  */
 export function settledPrices(raw: string[]): bigint[] | null {
   if (raw.length === 0) return null;
@@ -145,28 +120,12 @@ export function settledPrices(raw: string[]): bigint[] | null {
 }
 
 /**
- * Buffers rows and INSERTs them in batches, with bound parameters.
- *
- * EVERY `write` MUST PASS EXACTLY `cols.length` VALUES: placeholders are numbered
- * `$(k * cols.length + c + 1)`, so a short row shifts every later tuple onto the
- * wrong parameters.
- *
- * No ON CONFLICT by default, so a duplicate id aborts the load. The TRUNCATE in
- * rebuildFromFile covers rows already in the table, but NOT duplicate lines in
- * the corpus: fetch appends before it saves progress, so a crash mid-wave leaves
- * lines the resume point does not know about and the next run re-appends them.
- * Measured 0 duplicates across 3,581,853 markets, so this has never fired -- but
- * it is an unguarded assumption, not a guarantee.
- *
- * `limit` exists only to stay under the 65,535 parameters one statement allows,
- * hence dividing by the column count.
+ * Buffers rows and INSERTs them in batches with bound parameters.
  *
  * @param table - destination table, which must be empty.
- * @param cols - column order; `write` supplies one value per entry, in order.
- *   With `onConflict`, the first column must be the conflict key.
+ * @param cols - column order for `write`; with `onConflict`, the first is the key.
  * @param onConflict - e.g. `ON CONFLICT ("id") DO NOTHING`; omit to keep
  *   duplicates fatal.
- * @returns A handle to `write` rows into, `flush`, and `close` when done.
  */
 export function insertHandler(table: string, cols: string[], onConflict?: string): Inserter {
   const names = cols.map((c) => `"${c}"`).join(', ');
@@ -202,26 +161,22 @@ export function insertHandler(table: string, cols: string[], onConflict?: string
   };
 }
 
+/** True when the Gamma market is closed AND UMA-resolved. */
+function isResolvedMarket(m: Record<string, unknown>): boolean {
+  return m.closed === true && m.umaResolutionStatus === 'resolved';
+}
+
 /**
- * One Gamma market, reduced to the condition it describes.
+ * Reduces one Gamma market to its condition. Writes nothing; only bumps `stats`.
  *
- * Writes nothing and owns no collection: it returns a description and bumps
- * counters, and the caller decides which rows to insert and what to queue. Token
- * ids are NOT returned -- only `outcomeSlotCount`, from which the caller derives
- * them with getPositionId.
- *
- * `payoutPrices` is filled only when `updatedAt` predates the gate AND the prices
- * are a real settlement of the right arity; otherwise `invalidPayoutPrices` marks
- * the condition for a chain read. That includes markets updated at/after the
- * gate: `updatedAt` is Gamma's last touch, not the resolution time, and the chain
- * read is pinned below start_block, so it answers whether they had resolved.
+ * `payoutPrices` is set only if `updatedAt` < `gateTs`, the market is resolved,
+ * and the prices are an exact settlement of the right arity. Otherwise
+ * `invalidPayoutPrices` defers it to a chain read pinned below start_block.
  *
  * @param m - one parsed Gamma market object.
- * @param gateTs - start_block's timestamp in ms; payouts are seeded only from
- *   markets Gamma last touched before it.
+ * @param gateTs - start_block's timestamp in ms.
  * @param stats - counters to record into.
- * @returns The condition, or null when the market has no valid conditionId or no
- *   outcomes at all.
+ * @returns The condition, or null if conditionId is invalid or there are no outcomes.
  */
 export function parseMarket(
   m: Record<string, unknown>,
@@ -277,8 +232,10 @@ export function parseMarket(
   }
 
   if (!Number.isNaN(updatedAt) && updatedAt < gateTs) {
-    const prices = settledPrices(jsonArray(m.outcomePrices));
-    if (prices && prices.length === outcomeSlotCount) {
+    const prices = isResolvedMarket(m) ? settledPrices(jsonArray(m.outcomePrices)) : null;
+    if (!isResolvedMarket(m)) {
+      stats.unResolved++;
+    } else if (prices && prices.length === outcomeSlotCount) {
       stats.pricedGated++;
       payoutPrices = prices;
       invalidPayoutPrices = false;

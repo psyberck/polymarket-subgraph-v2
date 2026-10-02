@@ -1,10 +1,7 @@
 /**
- * Derive the seed from the corpus and insert it.
- *
- * Reads markets.jsonl, reads the chain for what Gamma could not answer, writes
- * Condition / OutcomeToken / NegRiskEvent, then runs stage 3 as a closing gate.
- * The corpus is split into line-aligned byte ranges, one per worker thread (see
- * utils/worker.ts); this file only prepares the run and gathers the counters.
+ * Seeds Condition / OutcomeToken / NegRiskEvent from markets.jsonl, falling back
+ * to the chain where Gamma can't answer, then verifies. Parsing runs in worker
+ * threads (utils/worker.ts); this file splits the work and gathers counters.
  *
  * MUST RUN AFTER `envio local db-migrate setup` AND BEFORE `envio start`.
  */
@@ -27,19 +24,13 @@ interface Batch {
   end: number;
 }
 
-/**
- * The RPC client
- */
 const RPC_URL = process.env.POLYGON_RPC_URL;
 const client = createPublicClient({
   chain: polygon,
   transport: http(RPC_URL, { retryCount: 5, retryDelay: 500, timeout: 30_000 }),
 });
 
-/**
- * Worker count. Each worker opens its own pg pool (max 4) and RPC client, so
- * this is capped well below Postgres's default 100 connections.
- */
+/** Capped at 8: each worker opens its own pg pool (max 4) and RPC client. */
 const WORKER_COUNT = Math.max(
   1,
   Number(process.env.WORKER_COUNT) || Math.min(availableParallelism(), 8),
@@ -47,12 +38,8 @@ const WORKER_COUNT = Math.max(
 const WORKER_URL = new URL('./utils/worker.ts', import.meta.url);
 
 /**
- * The indexed window's start, from config.yaml.
- *
- * Read from config rather than passed in, so the seed's gate and the indexer's
- * first block cannot disagree.
- *
- * @returns The start block and its timestamp in ms, which is the payout gate.
+ * start_block from config.yaml (so the seed and indexer can't disagree), and its
+ * timestamp in ms, which is the payout gate.
  */
 async function getBlockId(): Promise<{ block: bigint; ms: number }> {
   const cfg = parseYaml(readFileSync('config.yaml', 'utf8')) as {
@@ -70,15 +57,9 @@ async function getBlockId(): Promise<{ block: bigint; ms: number }> {
 }
 
 /**
- * Splits a file into at most `n` byte ranges of whole lines.
- *
- * Each boundary starts at `size * i / n` and moves forward to just past the next
- * '\n', so it never falls inside a line or a multi-byte character.
- *
- * @param filePath - File to split.
- * @param n - Number of ranges wanted.
- * @returns Contiguous, non-empty ranges covering the whole file, in order. Fewer
- *   than `n` when lines are long relative to the file; [] for an empty file.
+ * Splits a file into at most `n` contiguous byte ranges of whole lines. Each
+ * boundary moves forward from `size * i / n` to just past the next '\n'.
+ * Returns [] for an empty file.
  */
 async function getBatches(filePath: string, n: number): Promise<Batch[]> {
   const { size } = await stat(filePath);
@@ -95,7 +76,6 @@ async function getBatches(filePath: string, n: number): Promise<Batch[]> {
           pos = size;
           break;
         }
-        // '\n' marks the end of each line in markets.jsonl
         const nl = buf.subarray(0, bytesRead).indexOf('\n');
         if (nl !== -1) {
           pos += nl + 1;
@@ -116,23 +96,14 @@ async function getBatches(filePath: string, n: number): Promise<Batch[]> {
 }
 
 /**
- * Derive the whole seed from the archived corpus and insert it.
+ * Rebuilds the seed from the corpus; re-run whenever start_block moves.
  *
- * This is what re-runs when start_block moves: the gate changes, so every payout
- * decision changes, and nothing needs re-fetching.
+ * Refuses if UserPosition has rows (the indexer has run). TRUNCATEs first, which
+ * is required: the inserts have no ON CONFLICT. If a worker fails, the rest are
+ * terminated and the tables stay partial until the next run.
  *
- * TRUNCATEs first, which is required rather than tidy: Condition and
- * OutcomeToken inserts carry no ON CONFLICT, so anything already present aborts
- * the load. Refuses outright when UserPosition has rows -- seeding over an
- * indexed schema would overwrite event-derived data with values derived from
- * metadata.
- *
- * If any worker fails, the rest are terminated and the error is rethrown; the
- * tables are left partial until the next run TRUNCATEs them.
- *
- * @param gateTs - start_block's timestamp in ms.
- * @param startBlock - start_block; chain reads are pinned below it.
- * @returns Structural problems found by the closing verification; 0 is clean.
+ * @param startBlock - chain reads are pinned below it.
+ * @returns Problems found by verification; 0 is clean.
  */
 async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<number> {
   const indexed = await count('SELECT count(*) FROM "UserPosition"');
@@ -205,13 +176,8 @@ async function rebuildFromFile(gateTs: number, startBlock: bigint): Promise<numb
 }
 
 /**
- * Print the run's counters.
- *
- * `processed` is the audit: every line lands in exactly one bucket, so the
- * six must sum to the line count. A mismatch means a branch is double-counting
- * or dropping markets, which makes every other number here suspect.
- *
- * @param stats - counters gathered during the walk.
+ * Prints the counters. `processed` is the audit: every line lands in exactly one
+ * bucket, so the buckets must sum to the line count.
  */
 function report(stats: SinkStats): void {
   const processed =
@@ -221,12 +187,14 @@ function report(stats: SinkStats): void {
     stats.gateAfter +
     stats.gateBadTs +
     stats.pricedGated +
+    stats.unResolved +
     stats.deferred;
   const report: [string, string][] = [
     ['markets parsed', stats.parsed.toLocaleString()],
     ['Condition rows', stats.conditions.toLocaleString()],
     ['OutcomeToken rows', stats.tokens.toLocaleString()],
     ['payoutPrices seeded', stats.pricedGated.toLocaleString()],
+    ['not resolved in Gamma', stats.unResolved.toLocaleString()],
     ['validation needed', stats.deferred.toLocaleString()],
     ['...priced from chain', stats.chainPriced.toLocaleString()],
     ['derived-id mismatches', `${stats.idMismatch.toLocaleString()}  (expect 95)`],
