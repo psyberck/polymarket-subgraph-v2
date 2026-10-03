@@ -15,6 +15,8 @@ type Closed = (typeof CLOSED)[number];
 interface WalkState {
   /** Fetches the page as cursor; none before the first full page. */
   cursorId?: string;
+  /** Cursor of the page before `cursorId`, to detour around a blocked cursor. */
+  prevCursorId?: string;
   /** Highest market id saved from that page; lower ids are skipped on re-read. */
   marketId: number;
 }
@@ -76,10 +78,6 @@ const jsonLine = (v: unknown): string =>
  * run re-reads it, skips ids up to `marketId`, and carries on. A rejected
  * cursor (422) restarts that walk from the oldest.
  *
- * Cloudflare blocks some request URLs outright (403); the same cursor with a
- * smaller page size goes through, so a blocked page is retried one size smaller
- * at a time. The walks fail independently.
- *
  * @throws When a walk fails; the saved state resumes it.
  */
 async function fetchMarkets(): Promise<void> {
@@ -87,14 +85,16 @@ async function fetchMarkets(): Promise<void> {
   const p = getProgress();
 
   /**
-   * One page, retried with backoff. A 403 is Cloudflare blocking the URL, which
-   * a smaller page size gets past, so each 403 retries RETRY_STRIDE smaller.
-   *
-   * @returns The page.
-   * @throws After MAXIMUM_RETRY attempts.
+   * One page, retried with backoff. Each 403 retries RETRY_STRIDE smaller.
    */
-  const getPage = async (closed: Closed, cursor?: string): Promise<Page> => {
-    let limit = PAGE_SIZE;
+  const getPage = async (
+    closed: Closed,
+    cursor?: string,
+    size: number = PAGE_SIZE,
+    raiseOnError: boolean = false,
+  ): Promise<Page | null> => {
+    let limit = size;
+    let retry = false;
     const url = new URL(GAMMA_MARKETS_KEYSET);
     url.searchParams.set('order', 'id');
     url.searchParams.set('ascending', 'true');
@@ -113,15 +113,18 @@ async function fetchMarkets(): Promise<void> {
         const res = await fetch(url);
         if (res.ok) return (await res.json()) as Page;
         reason = `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`;
-        if (res.status === 403) limit = Math.max(RETRY_STRIDE, limit - RETRY_STRIDE);
+        retry = res.status === 403;
+        if (retry) limit = Math.max(1, limit - RETRY_STRIDE);
       } catch (e) {
         reason = e instanceof Error ? e.message : String(e);
+        retry = false;
       }
       console.log(`  closed=${closed} retry ${attempt}: ${reason}`);
       if (attempt < MAXIMUM_RETRY) {
         await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), 5_000)));
       }
     }
+    if (retry && !raiseOnError) return null;
     throw new Error(`closed=${closed}: ${MAXIMUM_RETRY} attempts reached: ${reason}`);
   };
 
@@ -130,14 +133,31 @@ async function fetchMarkets(): Promise<void> {
     const state = (p.cursors[closed] ??= { marketId: 0 });
     let pages = 0;
 
+    let detours = 0;
     for (;;) {
-      const page = await getPage(closed, state.cursorId);
+      let from = state.cursorId;
+      let page = await getPage(closed, from, PAGE_SIZE, false);
+      if (page === null) {
+        if (++detours > PAGE_SIZE / RETRY_STRIDE) {
+          throw new Error(`closed=${closed}: blocked at every detour size`);
+        }
+        const size = Math.max(1, PAGE_SIZE - RETRY_STRIDE * detours);
+        from = state.prevCursorId;
+        page = await getPage(closed, from, size, true);
+        console.log(`  closed=${closed}: cursor blocked, detoured with size ${size}`);
+      } else {
+        detours = 0;
+      }
+      if (page === null) throw new Error(`closed=${closed}: exhausted`);
       const ms = page.markets ?? [];
       const markets = ms.filter((m) => Number(m.id) > state.marketId);
       if (markets.length) appendFileSync(RAW, markets.map((m) => jsonLine(m)).join('\n') + '\n');
       p.markets += markets.length;
       for (const m of ms) state.marketId = Math.max(state.marketId, Number(m.id));
-      if (page.next_cursor) state.cursorId = page.next_cursor;
+      if (page.next_cursor) {
+        state.prevCursorId = from;
+        state.cursorId = page.next_cursor;
+      }
       saveProgress(p);
       if (++pages % 200 === 0) {
         console.log(
