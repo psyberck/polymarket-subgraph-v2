@@ -1,70 +1,23 @@
-/** Append Gamma markets to markets.jsonl */
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+/**
+ * Rebuild the Gamma market corpus (markets.jsonl) from `/events`, every run.
+ */
+import { appendFileSync, renameSync, writeFileSync } from 'node:fs';
 import { META_FILE, RAW } from './utils/literals';
 
-const GAMMA_MARKETS_KEYSET = 'https://gamma-api.polymarket.com/markets/keyset';
+const GAMMA_EVENTS = 'https://gamma-api.polymarket.com/events';
 
 const RPS = 50;
 const PAGE_SIZE = 100;
+const WORKERS = 10;
 const MAXIMUM_RETRY = 10;
-const RETRY_STRIDE = 10;
+const EMPTY_WAVES_TO_TERMINATE = 10;
 
-const CLOSED = ['true', 'false'] as const;
-type Closed = (typeof CLOSED)[number];
+const TMP = `${RAW}.tmp`;
 
-interface WalkState {
-  /** Fetches the page as cursor; none before the first full page. */
-  cursorId?: string;
-  /** Cursor of the page before `cursorId`, to detour around a blocked cursor. */
-  prevCursorId?: string;
-  /** Highest market id saved from that page; lower ids are skipped on re-read. */
-  marketId: number;
-}
-
-interface Progress {
-  cursors: Partial<Record<Closed, WalkState>>;
-  markets: number;
-  updatedAt: string;
-  completed: boolean;
-}
-
-interface Page {
-  markets?: GammaMarket[];
-  next_cursor?: string;
-}
-
-interface GammaMarket {
+interface GammaEvent {
   id: string;
+  markets?: unknown[];
 }
-
-/**
- * Progress from disk, or a fresh one.
- *
- * @returns The saved walk state.
- */
-const getProgress = (): Progress => {
-  const p = existsSync(META_FILE)
-    ? (JSON.parse(readFileSync(META_FILE, 'utf8')) as Partial<Progress>)
-    : {};
-  return {
-    ...p,
-    cursors: p.cursors ?? {},
-    markets: p.markets ?? 0,
-    updatedAt: p.updatedAt ?? new Date().toISOString(),
-    completed: false,
-  };
-};
-
-/**
- * Write progress. Called after appending, so a crash re-fetches a page rather
- * than skipping it.
- *
- * @param p - the progress to persist; `updatedAt` is set here.
- */
-const saveProgress = (p: Progress) => {
-  p.updatedAt = new Date().toISOString();
-  writeFileSync(META_FILE, JSON.stringify(p, null, 2));
-};
 
 /** One record per line: escapes U+2028/U+2029, which readline splits on. */
 const jsonLine = (v: unknown): string =>
@@ -73,116 +26,103 @@ const jsonLine = (v: unknown): string =>
     .replace(/\u2029/g, '\\u2029');
 
 /**
- * Walk markets oldest first, one walk per `closed` value in parallel, from each
- * walk's saved page to the newest. The last page keeps its cursor, so the next
- * run re-reads it, skips ids up to `marketId`, and carries on. A rejected
- * cursor (422) restarts that walk from the oldest.
+ * Highest event id in a batch; 0 when it is empty.
  *
- * @throws When a walk fails; the saved state resumes it.
+ * @param evs - events from one or more requests.
+ */
+const getMaxEventId = (evs: GammaEvent[]): number =>
+  evs.reduce((hi, e) => {
+    const n = Number(e.id);
+    return Number.isInteger(n) && n > hi ? n : hi;
+  }, 0);
+
+let slot = 0;
+
+/**
+ * One request's events, retried with backoff.
+ *
+ * @param start - first event id of the batch; omitted for the first page by
+ *   id ascending, which is how the walk learns where events begin.
+ * @returns The raw events.
+ * @throws After MAXIMUM_RETRY attempts; the run then fails and is rerun.
+ */
+const getEvents = async (start?: number): Promise<GammaEvent[]> => {
+  const url = new URL(GAMMA_EVENTS);
+  url.searchParams.set('limit', String(PAGE_SIZE));
+  url.searchParams.set('order', 'id');
+  url.searchParams.set('ascending', 'true');
+  if (start !== undefined) {
+    for (let id = start; id < start + PAGE_SIZE; id++) url.searchParams.append('id', String(id));
+  }
+
+  let reason = '';
+  for (let attempt = 1; attempt <= MAXIMUM_RETRY; attempt++) {
+    const now = Date.now();
+    const at = Math.max(now, slot);
+    slot = at + 1000 / RPS;
+    if (at > now) await new Promise((r) => setTimeout(r, at - now));
+    try {
+      const res = await fetch(url);
+      if (res.ok) return (await res.json()) as GammaEvent[];
+      reason = `HTTP ${res.status}`;
+    } catch (e) {
+      reason = e instanceof Error ? e.message : String(e);
+    }
+    console.log(`  ids ${start ?? 'first page'} retry ${attempt}: ${reason}`);
+    if (attempt < MAXIMUM_RETRY) {
+      await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), 5_000)));
+    }
+  }
+  throw new Error(`ids ${start ?? 'first page'}: ${MAXIMUM_RETRY} attempts reached: ${reason}`);
+};
+
+/**
+ * Walk every event by id, WORKERS batches of PAGE_SIZE ids at a time, and
+ * write their markets to TMP; then rename TMP over RAW.
  */
 async function fetchMarkets(): Promise<void> {
-  let slot = 0;
-  const p = getProgress();
+  const t0 = Date.now();
+  writeFileSync(TMP, '');
+  let events = 0;
+  let markets = 0;
+  let waves = 0;
+  let empty = 0;
 
-  /**
-   * One page, retried with backoff. Each 403 retries RETRY_STRIDE smaller.
-   */
-  const getPage = async (
-    closed: Closed,
-    cursor?: string,
-    size: number = PAGE_SIZE,
-    raiseOnError: boolean = false,
-  ): Promise<Page | null> => {
-    let limit = size;
-    let retry = false;
-    const url = new URL(GAMMA_MARKETS_KEYSET);
-    url.searchParams.set('order', 'id');
-    url.searchParams.set('ascending', 'true');
-    url.searchParams.set('closed', closed);
-    if (cursor) url.searchParams.set('after_cursor', cursor);
-
-    let reason = '';
-    for (let attempt = 1; attempt <= MAXIMUM_RETRY; attempt++) {
-      url.searchParams.set('limit', String(limit));
-      const now = Date.now();
-      const at = Math.max(now, slot);
-      slot = at + 1000 / RPS;
-      if (at > now) await new Promise((r) => setTimeout(r, at - now));
-
-      try {
-        const res = await fetch(url);
-        if (res.ok) return (await res.json()) as Page;
-        reason = `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`;
-        retry = res.status === 403;
-        if (retry) limit = Math.max(1, limit - RETRY_STRIDE);
-      } catch (e) {
-        reason = e instanceof Error ? e.message : String(e);
-        retry = false;
-      }
-      console.log(`  closed=${closed} retry ${attempt}: ${reason}`);
-      if (attempt < MAXIMUM_RETRY) {
-        await new Promise((r) => setTimeout(r, Math.min(250 * 2 ** (attempt - 1), 5_000)));
-      }
-    }
-    if (retry && !raiseOnError) return null;
-    throw new Error(`closed=${closed}: ${MAXIMUM_RETRY} attempts reached: ${reason}`);
+  const append = (evs: GammaEvent[]) => {
+    const ms = evs.flatMap((e) => e.markets ?? []);
+    if (ms.length) appendFileSync(TMP, ms.map((m) => jsonLine(m)).join('\n') + '\n');
+    events += evs.length;
+    markets += ms.length;
   };
 
-  /** One `closed` walk, from its saved page to the newest. */
-  const walk = async (closed: Closed): Promise<void> => {
-    const state = (p.cursors[closed] ??= { marketId: 0 });
-    let pages = 0;
+  const first = await getEvents();
+  append(first);
+  let next = getMaxEventId(first) + 1;
+  if (next === 1) throw new Error('first page returned no events — cannot find a start id');
 
-    let detours = 0;
-    for (;;) {
-      let from = state.cursorId;
-      let page = await getPage(closed, from, PAGE_SIZE, false);
-      if (page === null) {
-        if (++detours > PAGE_SIZE / RETRY_STRIDE) {
-          throw new Error(`closed=${closed}: blocked at every detour size`);
-        }
-        const size = Math.max(1, PAGE_SIZE - RETRY_STRIDE * detours);
-        from = state.prevCursorId;
-        page = await getPage(closed, from, size, true);
-        console.log(`  closed=${closed}: cursor blocked, detoured with size ${size}`);
-      } else {
-        detours = 0;
-      }
-      if (page === null) throw new Error(`closed=${closed}: exhausted`);
-      const ms = page.markets ?? [];
-      const markets = ms.filter((m) => Number(m.id) > state.marketId);
-      if (markets.length) appendFileSync(RAW, markets.map((m) => jsonLine(m)).join('\n') + '\n');
-      p.markets += markets.length;
-      for (const m of ms) state.marketId = Math.max(state.marketId, Number(m.id));
-      if (page.next_cursor) {
-        state.prevCursorId = from;
-        state.cursorId = page.next_cursor;
-      }
-      saveProgress(p);
-      if (++pages % 200 === 0) {
-        console.log(
-          `  closed=${closed}: ${pages} pages, at id ${state.marketId.toLocaleString()}, ` +
-            `markets=${p.markets.toLocaleString()}`,
-        );
-      }
-      if (!page.next_cursor) return;
+  for (;;) {
+    const starts = Array.from({ length: WORKERS }, (_, k) => next + k * PAGE_SIZE);
+    const evs = (await Promise.all(starts.map((s) => getEvents(s)))).flat();
+    append(evs);
+    next += WORKERS * PAGE_SIZE;
+    empty = evs.length ? 0 : empty + 1;
+    if (empty >= EMPTY_WAVES_TO_TERMINATE) break;
+    if (++waves % 50 === 0) {
+      console.log(
+        `  id ${(next - 1).toLocaleString()}  events=${events.toLocaleString()} ` +
+          `markets=${markets.toLocaleString()}`,
+      );
     }
-  };
+  }
 
-  console.log(`  starting from ${JSON.stringify(p.cursors)}...`);
-  const results = await Promise.allSettled(CLOSED.map((c) => walk(c)));
-  const failed = results.flatMap((r, i) =>
-    r.status === 'rejected' ? [[CLOSED[i], r.reason]] : [],
+  renameSync(TMP, RAW);
+  const seconds = Math.round((Date.now() - t0) / 1000);
+  writeFileSync(
+    META_FILE,
+    JSON.stringify({ completedAt: new Date().toISOString(), events, markets, seconds }, null, 2),
   );
-  for (const [c, e] of failed)
-    console.log(`  closed=${c} FAILED: ${e instanceof Error ? e.message : e}`);
-  if (failed.length) throw new Error(`${failed.length} walk(s) failed; rerun to resume`);
-
-  p.completed = true;
-  saveProgress(p);
   console.log(
-    `\n  DONE  markets=${p.markets.toLocaleString()} at ` +
-      CLOSED.map((c) => `closed=${c} id ${p.cursors[c]?.marketId.toLocaleString()}`).join(', '),
+    `\n  DONE  events=${events.toLocaleString()} markets=${markets.toLocaleString()} in ${seconds}s`,
   );
 }
 
