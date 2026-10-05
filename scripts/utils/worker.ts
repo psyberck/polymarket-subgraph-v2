@@ -17,7 +17,7 @@ import {
   type SinkStats,
   TOKEN_COLS,
 } from './parse.ts';
-import { pool } from './postgres.ts';
+import { pool } from '../../tools/postgres.ts';
 
 /** A slice of the corpus for one worker. */
 export interface Request {

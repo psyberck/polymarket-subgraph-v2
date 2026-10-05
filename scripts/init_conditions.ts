@@ -12,7 +12,7 @@ import { createPublicClient, http } from 'viem';
 import { polygon } from 'viem/chains';
 import { RAW } from './utils/literals.ts';
 import { createSinkStats, type SinkStats } from './utils/parse.ts';
-import { count, exec } from './utils/postgres.ts';
+import { count, exec } from '../tools/postgres.ts';
 import type { Request, Response } from './utils/worker.ts';
 import { verify } from './verify_conditions.ts';
 

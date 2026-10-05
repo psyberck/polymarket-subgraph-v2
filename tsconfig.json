@@ -15,5 +15,11 @@
       "@utils/*": ["src/utils/*"]
     }
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts", "envio-env.d.ts"]
+  "include": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "tools/**/*.ts",
+    "supervisor/**/*.ts",
+    "envio-env.d.ts"
+  ]
 }

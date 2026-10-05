@@ -1,25 +1,13 @@
 /**
- * Verify the structural invariants a loaded seed must satisfy.
- *
- * Read-only, so it is safe to run at any time. Exported because init runs it as
- * its own closing gate; the block at the bottom runs it when this file is the
- * entry point instead.
+ * Read-only check of a loaded seed. init_conditions.ts runs it as its last step;
+ * it also runs standalone.
  */
 import { pathToFileURL } from 'node:url';
-import { count } from './utils/postgres.ts';
+import { count } from '../tools/postgres.ts';
 
 /**
- * The structural invariants that would make a loaded seed useless.
- *
- * Read-only. The rows are written by the streaming pipeline as it goes, so this
- * runs after it and is the only check that sees BOTH tables -- the two
- * cross-table invariants below cannot be evaluated during the stream.
- *
- * The seed itself must be in place AFTER `envio local db-migrate setup` and
- * BEFORE `envio start`: envio's `initialize()` is `DROP SCHEMA ... CASCADE` and
- * runs whenever `isInitialized()` is false, so seeding first loses everything.
- * Seeded rows with zero `envio_history_*` entries do survive a restart, but they
- * do not survive an initialize.
+ * Checks the invariants that would make a seed useless, including the
+ * cross-table ones the streaming load cannot check as it goes.
  *
  * @returns Number of structural problems found; 0 is clean.
  */

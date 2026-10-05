@@ -1,6 +1,6 @@
 import { COLLATERAL_SCALE, NEG_RISK_WRAPPED_COLLATERAL, USDC } from '../../src/utils/constants.ts';
 import { computePositionId } from '../../src/utils/ctf-utils.ts';
-import { pool } from './postgres.ts';
+import { pool } from '../../tools/postgres.ts';
 
 /** Max rows per INSERT. */
 export const INSERT_BATCH = 10_000;
