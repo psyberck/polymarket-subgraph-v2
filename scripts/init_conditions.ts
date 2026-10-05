@@ -2,8 +2,6 @@
  * Seeds Condition / OutcomeToken / NegRiskEvent from markets.jsonl, falling back
  * to the chain where Gamma can't answer, then verifies. Parsing runs in worker
  * threads (utils/worker.ts); this file splits the work and gathers counters.
- *
- * MUST RUN AFTER `envio local db-migrate setup` AND BEFORE `envio start`.
  */
 import { readFileSync } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
@@ -102,6 +100,7 @@ async function getBatches(filePath: string, n: number): Promise<Batch[]> {
  * is required: the inserts have no ON CONFLICT. If a worker fails, the rest are
  * terminated and the tables stay partial until the next run.
  *
+ * @param gateTs - start_block's timestamp in ms, the payout gate.
  * @param startBlock - chain reads are pinned below it.
  * @returns Problems found by verification; 0 is clean.
  */
