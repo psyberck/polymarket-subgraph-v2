@@ -1,13 +1,26 @@
 import { Pool } from 'pg';
 
-export const pool = new Pool({
+/** Connection settings, read the same way Envio reads them (`ENVIO_PG_*`). */
+export const pgSettings = {
   host: process.env.ENVIO_PG_HOST ?? 'localhost',
   port: Number(process.env.ENVIO_PG_PORT ?? 5433),
   user: process.env.ENVIO_PG_USER ?? 'postgres',
   database: process.env.ENVIO_PG_DATABASE ?? 'envio-dev',
   password: process.env.ENVIO_PG_PASSWORD ?? 'testing',
-  ssl: process.env.ENVIO_PG_HOST
-    ? { rejectUnauthorized: (process.env.ENVIO_PG_SSL_MODE ?? 'require') === 'verify-full' }
+  sslMode: process.env.ENVIO_PG_HOST ? (process.env.ENVIO_PG_SSL_MODE ?? 'require') : undefined,
+};
+
+/** The schema Envio writes its tables to. */
+export const pgSchema = process.env.ENVIO_PG_SCHEMA ?? 'public';
+
+export const pool = new Pool({
+  host: pgSettings.host,
+  port: pgSettings.port,
+  user: pgSettings.user,
+  database: pgSettings.database,
+  password: pgSettings.password,
+  ssl: pgSettings.sslMode
+    ? { rejectUnauthorized: pgSettings.sslMode === 'verify-full' }
     : undefined,
   connectionTimeoutMillis: 15_000,
   max: 4,
