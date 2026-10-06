@@ -35,7 +35,7 @@ type OrderFilled @storage(postgres: true, clickhouse: true) {
   tokens: BigInt! # outcome tokens moved
   usdc: BigInt! # collateral moved, 1e6
   price: BigInt! # usdc/tokens, 1e6
-  blockNumber: Int!
+  blockNumber: Int! @index
   logIndex: Int!
   timestamp: Int!
 }
