@@ -57,7 +57,7 @@ contracts:
   - name: CtfCollateralAdapter
     events:
       - event: 'PositionSplit(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
-      - event: 'gstPositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+      - event: 'PositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
       - event: 'PositionsRedeemed(address indexed initiator, bytes32 indexed conditionId, uint256[] amounts, uint256 payout)'
 
   # ── Auto-redeemers ─────────────────────────────────────────────────
