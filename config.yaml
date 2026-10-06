@@ -57,7 +57,7 @@ contracts:
   - name: CtfCollateralAdapter
     events:
       - event: 'PositionSplit(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
-      - event: 'PositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
+      - event: 'gstPositionsMerged(address indexed initiator, bytes32 indexed conditionId, uint256 amount)'
       - event: 'PositionsRedeemed(address indexed initiator, bytes32 indexed conditionId, uint256[] amounts, uint256 payout)'
 
   # ── Auto-redeemers ─────────────────────────────────────────────────
@@ -71,7 +71,8 @@ contracts:
 
 chains:
   - id: 137 # Polygon
-    start_block: 85050370
+    start_block: ${ENVIO_START_BLOCK:-85050370}
+    end_block: ${ENVIO_END_BLOCK:-}
     rpc:
       # Upstream is PROXY_UPSTREAM (default Tenderly). Point url straight at
       # an endpoint with real headroom to skip the proxy.
