@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { META_FILE, OUT_DIR, RAW } from './utils/literals';
+import { META_FILE, OUT_DIR, RAW } from '#scripts/utils/literals.ts';
 
 const GAMMA_EVENTS = 'https://gamma-api.polymarket.com/events';
 

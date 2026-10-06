@@ -3,7 +3,7 @@
  * it also runs standalone.
  */
 import { pathToFileURL } from 'node:url';
-import { count } from '../tools/postgres.ts';
+import { count } from '#tools/postgres.ts';
 
 /**
  * Checks the invariants that would make a seed useless, including the

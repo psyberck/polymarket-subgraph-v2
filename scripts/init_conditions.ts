@@ -10,11 +10,11 @@ import { Worker } from 'node:worker_threads';
 import { parse as parseYaml } from 'yaml';
 import { createPublicClient, http } from 'viem';
 import { polygon } from 'viem/chains';
-import { RAW } from './utils/literals.ts';
-import { createSinkStats, type SinkStats } from './utils/parse.ts';
-import { count, exec } from '../tools/postgres.ts';
-import type { Request, Response } from './utils/worker.ts';
-import { verify } from './verify_conditions.ts';
+import { RAW } from '#scripts/utils/literals.ts';
+import { createSinkStats, type SinkStats } from '#scripts/utils/parse.ts';
+import { count, exec } from '#tools/postgres.ts';
+import type { Request, Response } from '#scripts/utils/worker.ts';
+import { verify } from '#scripts/verify_conditions.ts';
 
 /** A byte range [start, end) of whole lines. */
 interface Batch {

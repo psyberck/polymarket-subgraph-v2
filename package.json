@@ -4,6 +4,12 @@
   "private": true,
   "license": "MIT",
   "type": "module",
+  "imports": {
+    "#supervisor/*": "./supervisor/*",
+    "#scripts/*": "./scripts/*",
+    "#tools/*": "./tools/*",
+    "#src/*": "./src/*"
+  },
   "scripts": {
     "codegen": "envio codegen",
     "dev": "envio dev",
