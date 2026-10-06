@@ -35,7 +35,7 @@ export default defineConfig([
     extends: [tseslint.configs.disableTypeChecked],
   },
   {
-    files: ['scripts/**'],
+    files: ['scripts/**', 'supervisor/**'],
     rules: {
       'no-console': 'off',
     },
