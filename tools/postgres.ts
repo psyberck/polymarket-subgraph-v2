@@ -13,6 +13,15 @@ export const pgSettings = {
 /** The schema Envio writes its tables to. */
 export const pgSchema = process.env.ENVIO_PG_SCHEMA ?? 'public';
 
+/** Quote an SQL identifier (both dialects accept double quotes). */
+export const quote = (name: string): string => `"${name.replace(/"/g, '""')}"`;
+
+/** Quote an SQL string literal (both dialects). */
+export const literal = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+
+/** A table in the schema Envio writes to (ENVIO_PG_SCHEMA). */
+export const table = (name: string): string => `${quote(pgSchema)}.${quote(name)}`;
+
 export const pool = new Pool({
   host: pgSettings.host,
   port: pgSettings.port,
