@@ -27,7 +27,9 @@ const pidFile = (pid: number): string => join(INDEXER_PID_DIR, String(pid));
 /** /proc/{pid}/stat, whose start time tells a process from a later pid reuse; Linux only. */
 function readProcStat(pid: number): string | null {
   try {
-    return readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const stats = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const fields = stats.slice(stats.lastIndexOf(')') + 2).split(' ');
+    return fields[19];
   } catch {
     return null;
   }
@@ -295,13 +297,17 @@ export class Indexer implements AsyncDisposable {
   private async terminateOrphans(): Promise<void> {
     await this.al.assertHeld();
     if (!existsSync(INDEXER_PID_DIR)) return;
-    const filenames = readdirSync(INDEXER_PID_DIR);
-    for (const filename of filenames) {
+    for (const filename of readdirSync(INDEXER_PID_DIR)) {
+      const path = join(INDEXER_PID_DIR, filename);
       if (/^[1-9]\d*$/.test(filename)) {
         const pid = Number(filename);
-        if (readProcStat(pid) === readFileSync(pidFile(pid), 'utf8')) await this.terminate(pid);
+        const stat = readProcStat(pid);
+        if (stat === readFileSync(path, 'utf8').trim()) {
+          console.log(`indexer: stopping orphan, pid ${pid}`);
+          await this.terminate(pid);
+        }
       }
-      rmSync(join(INDEXER_PID_DIR, filename), { force: true });
+      rmSync(path, { force: true });
     }
   }
 
