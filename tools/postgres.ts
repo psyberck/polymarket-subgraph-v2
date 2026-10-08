@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { type ClientConfig, Pool, type PoolClient } from 'pg';
 
 /** Connection settings, read the same way Envio reads them (`ENVIO_PG_*`). */
 export const pgSettings = {
@@ -22,7 +22,8 @@ export const literal = (value: string): string => `'${value.replace(/'/g, "''")}
 /** A table in the schema Envio writes to (ENVIO_PG_SCHEMA). */
 export const table = (name: string): string => `${quote(pgSchema)}.${quote(name)}`;
 
-export const pool = new Pool({
+/** pg connection options from pgSettings, for the pool and any dedicated client. */
+export const pgConfig: ClientConfig = {
   host: pgSettings.host,
   port: pgSettings.port,
   user: pgSettings.user,
@@ -32,8 +33,33 @@ export const pool = new Pool({
     ? { rejectUnauthorized: pgSettings.sslMode === 'verify-full' }
     : undefined,
   connectionTimeoutMillis: 15_000,
-  max: 4,
-});
+};
+
+export const pool = new Pool({ ...pgConfig, max: 4 });
+
+/**
+ * Run `fn` in one transaction on its own pooled connection: COMMIT if it
+ * returns, ROLLBACK if it throws, and the error is rethrown.
+ *
+ * @param fn - every statement of the transaction, run through `client`.
+ */
+export async function transaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  let err: Error | undefined;
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    await client.query('ROLLBACK').catch((r: unknown) => {
+      err = r instanceof Error ? r : new Error(String(r));
+    });
+    throw e;
+  } finally {
+    client.release(err);
+  }
+}
 
 /**
  * Run a statement, discarding any result.
