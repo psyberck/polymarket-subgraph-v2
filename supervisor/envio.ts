@@ -149,7 +149,7 @@ export class Indexer implements AsyncDisposable {
    * @returns The session, holding the lock.
    * @throws LockHeldError if another supervisor holds the lock.
    */
-  static async open(): Promise<Indexer> {
+  static async create(): Promise<Indexer> {
     const session = new Indexer(await AdvisoryLock.acquire(`Indexer:${pgSchema}`));
     try {
       await session.terminateOrphans();
