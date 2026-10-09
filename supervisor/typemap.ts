@@ -1,33 +1,15 @@
-/**
- * The snapshot type map (snapshot-design.md §3.5), generated from
- * schema.graphql so a schema change cannot silently drift from the export.
- *
- * For every column it produces four things, each used on one side of the
- * Postgres → Parquet copy:
- *   - how Postgres hands the value over (`numeric` always as text: DuckDB reads
- *     undeclared-precision numeric as DOUBLE and loses token ids);
- *   - how DuckDB casts it for Parquet (text → HUGEINT → DECIMAL(38,0), never
- *     text → DECIMAL directly, which is 70x slower; never HUGEINT in the file,
- *     which Parquet stores as double);
- *   - the type the file must report back (the schema assertion);
- *   - check values and a canonical text form, computed identically by
- *     Postgres over the table and by DuckDB over the file (archive.ts).
- */
 import { readFileSync } from 'node:fs';
-import { literal, quote } from '#supervisor/util.ts';
+import { type FieldDefinitionNode, Kind, parse, print } from 'graphql';
+import { literal, quote } from '#tools/postgres.ts';
 
 /** The Parquet column type a file must report, as DuckDB's DESCRIBE prints it. */
 export type ParquetType = 'VARCHAR' | 'INTEGER' | 'BOOLEAN' | 'DECIMAL(38,0)' | 'DECIMAL(38,0)[]';
-
-export type ColumnKind = 'text' | 'int' | 'bool' | 'decimal' | 'decimalList';
+export type ColumnKind = 'text' | 'bigText' | 'int' | 'bool' | 'decimal' | 'decimalList';
 
 export interface Column {
   name: string;
   kind: ColumnKind;
   nullable: boolean;
-  parquetType: ParquetType;
-  /** Postgres column type, as information_schema's `udt_name`. */
-  pgUdt: 'text' | 'int4' | 'bool' | 'numeric' | '_numeric';
 }
 
 export interface Entity {
@@ -35,66 +17,150 @@ export interface Entity {
   columns: Column[];
 }
 
-/**
- * BigInt fields that hold an outcome token id: 78 digits, beyond
- * DECIMAL(38,0), so they stay text.
- */
+export interface ColumnCodec {
+  /**
+   * Postgres types (information_schema's `udt_name`) accepted for the column:
+   * the first is what Envio 3.6.1 creates, the rest what earlier schemas left.
+   */
+  pgUdts: readonly string[];
+  /** The Parquet type the file must have, as DuckDB's DESCRIBE prints it. */
+  parquetType: ParquetType;
+  /** Postgres read for the export: numbers as text, never as numeric. */
+  pgSelect: (col: string) => string;
+  /** DuckDB cast from those Postgres rows to the file's type. */
+  dkCast: (col: string) => string;
+  /** Canonical text in Postgres, for the fingerprint. */
+  pgText: (col: string) => string;
+  /** Canonical text in DuckDB; equal to `pgText` for equal values. */
+  dkText: (col: string) => string;
+  /** Restore: the staging table's column type; numbers travel as text. */
+  stagingType: string;
+  /** Restore: DuckDB read from the file into staging. */
+  fromFile: (col: string) => string;
+  /** Restore: Postgres cast from staging into a target column of type `udt`. */
+  toPg: (col: string, udt: string) => string;
+}
+
+const asIs = (col: string): string => col;
+const pgToText = (col: string): string => `${col}::text`;
+const dkToText = (col: string): string => `${col}::VARCHAR`;
+const boolText = (col: string): string => `CASE WHEN ${col} THEN 't' WHEN NOT ${col} THEN 'f' END`;
+
+export const CODECS = {
+  text: {
+    parquetType: 'VARCHAR',
+    pgUdts: ['text'],
+    pgSelect: asIs,
+    dkCast: asIs,
+    pgText: asIs,
+    dkText: asIs,
+    stagingType: 'text',
+    fromFile: asIs,
+    toPg: asIs,
+  },
+  bigText: {
+    parquetType: 'VARCHAR',
+    pgUdts: ['numeric'],
+    pgSelect: pgToText,
+    dkCast: asIs,
+    pgText: pgToText,
+    dkText: asIs,
+    stagingType: 'text',
+    fromFile: asIs,
+    toPg: (col) => `${col}::numeric`,
+  },
+  int: {
+    parquetType: 'INTEGER',
+    pgUdts: ['int4'],
+    pgSelect: asIs,
+    dkCast: asIs,
+    pgText: pgToText,
+    dkText: dkToText,
+    stagingType: 'integer',
+    fromFile: asIs,
+    toPg: asIs,
+  },
+  bool: {
+    parquetType: 'BOOLEAN',
+    pgUdts: ['bool'],
+    pgSelect: asIs,
+    dkCast: asIs,
+    pgText: boolText,
+    dkText: boolText,
+    stagingType: 'boolean',
+    fromFile: asIs,
+    toPg: asIs,
+  },
+  decimal: {
+    parquetType: 'DECIMAL(38,0)',
+    pgUdts: ['numeric'],
+    pgSelect: pgToText,
+    dkCast: (col) => `${col}::HUGEINT::DECIMAL(38,0)`,
+    pgText: pgToText,
+    dkText: dkToText,
+    stagingType: 'text',
+    fromFile: dkToText,
+    toPg: (col) => `${col}::numeric`,
+  },
+  decimalList: {
+    parquetType: 'DECIMAL(38,0)[]',
+    pgUdts: ['_numeric', '_text'],
+    pgSelect: (col) => `${col}::text[]`,
+    dkCast: (col) => `list_transform(${col}, v -> v::HUGEINT::DECIMAL(38,0))`,
+    pgText: (col) => `array_to_string(${col}, ',')`,
+    dkText: (col) => `array_to_string(list_transform(${col}, v -> v::VARCHAR), ',')`,
+    stagingType: 'text[]',
+    fromFile: (col) => `list_transform(${col}, v -> v::VARCHAR)`,
+    toPg: (col, udt) => (udt === '_numeric' ? `${col}::numeric[]` : col),
+  },
+} as const satisfies Record<ColumnKind, ColumnCodec>;
+
+/** The codec of a column's kind. */
+export const codec = (c: Column): ColumnCodec => CODECS[c.kind];
+
+/** schema.graphql field types (nullability aside) and the kind each becomes. */
+const FIELD_KINDS = new Map<string, ColumnKind>([
+  ['ID', 'text'],
+  ['String', 'text'],
+  ['Int', 'int'],
+  ['Boolean', 'bool'],
+  ['BigInt', 'decimal'],
+  ['[BigInt!]', 'decimalList'],
+]);
+/** BigInt fields holding a token id: 78 digits, beyond DECIMAL(38,0), so kept as text. */
 const TOKEN_ID_FIELDS = new Set(['tokenId']);
 
-function column(name: string, type: string, nullable: boolean, entity: string): Column {
-  const base = { name, nullable };
-  switch (type) {
-    case 'ID':
-    case 'String':
-      return { ...base, kind: 'text', parquetType: 'VARCHAR', pgUdt: 'text' };
-    case 'Int':
-      return { ...base, kind: 'int', parquetType: 'INTEGER', pgUdt: 'int4' };
-    case 'Boolean':
-      return { ...base, kind: 'bool', parquetType: 'BOOLEAN', pgUdt: 'bool' };
-    case 'BigInt':
-      return TOKEN_ID_FIELDS.has(name)
-        ? { ...base, kind: 'text', parquetType: 'VARCHAR', pgUdt: 'numeric' }
-        : { ...base, kind: 'decimal', parquetType: 'DECIMAL(38,0)', pgUdt: 'numeric' };
-    case '[BigInt!]':
-      // numeric[] as Envio 3.6.1 creates it; text[] is accepted too (LEGACY_UDTS).
-      return { ...base, kind: 'decimalList', parquetType: 'DECIMAL(38,0)[]', pgUdt: '_numeric' };
-    default:
-      throw new Error(`${entity}.${name}: type ${type} has no snapshot mapping`);
-  }
+function column(entity: string, field: FieldDefinitionNode): Column {
+  const name = field.name.value;
+  const nullable = field.type.kind !== Kind.NON_NULL_TYPE;
+  const type = print(field.type.kind === Kind.NON_NULL_TYPE ? field.type.type : field.type);
+  const kind = FIELD_KINDS.get(type);
+  if (!kind) throw new Error(`${entity}.${name}: type ${type} has no snapshot mapping`);
+  return {
+    name,
+    nullable,
+    kind: kind === 'decimal' && TOKEN_ID_FIELDS.has(name) ? 'bigText' : kind,
+  };
 }
 
 /**
- * Parse the entity types out of schema.graphql. Only the subset this schema
- * uses: `type X @storage(...) { field: Type[!] # comment }`.
+ * Parse the entity types out of schema.graphql. `@derivedFrom` fields are
+ * virtual (no column) and skipped; any other definition is refused.
  *
  * @param source - schema.graphql's text.
  * @returns Entities in file order, columns in field order.
+ * @throws GraphQLError on a syntax error, Error on a type with no mapping.
  */
 export function parseSchema(source: string): Entity[] {
-  const entities: Entity[] = [];
-  let current: Entity | null = null;
-  // Line by line, comments stripped first: comments contain braces
-  // (`# "{user}-{tokenId}"`), so a regex over the raw body would cut it short.
-  for (const raw of source.split('\n')) {
-    const line = raw.replace(/#.*/, '').trim();
-    if (!line) continue;
-    if (!current) {
-      const m = /^type\s+(\w+)\b[^{]*\{$/.exec(line);
-      if (!m) throw new Error(`cannot parse schema line "${raw.trim()}"`);
-      current = { name: m[1], columns: [] };
-    } else if (line === '}') {
-      entities.push(current);
-      current = null;
-    } else {
-      // Field directives (`@index`) do not change the column, so they are skipped.
-      const m = /^(\w+)\s*:\s*(\[\w+!?\]|\w+)(!?)(?:\s+@\w+(?:\([^)]*\))?)*$/.exec(line);
-      if (!m) throw new Error(`${current.name}: cannot parse field line "${raw.trim()}"`);
-      const [, field, type, bang] = m;
-      current.columns.push(column(field, type, bang !== '!', current.name));
-    }
-  }
-  if (current) throw new Error(`${current.name}: missing closing brace`);
-  return entities;
+  return parse(source).definitions.map((def) => {
+    if (def.kind !== Kind.OBJECT_TYPE_DEFINITION)
+      throw new Error(`schema.graphql: ${def.kind} is not supported`);
+    const name = def.name.value;
+    const fields = (def.fields ?? []).filter(
+      (f) => !f.directives?.some((d) => d.name.value === 'derivedFrom'),
+    );
+    return { name, columns: fields.map((f) => column(name, f)) };
+  });
 }
 
 /** Entities from the indexer's schema.graphql. */
@@ -102,103 +168,78 @@ export function loadSchema(path = new URL('../schema.graphql', import.meta.url))
   return parseSchema(readFileSync(path, 'utf8'));
 }
 
-/**
- * Column types also accepted for a kind: the live database (created by an
- * earlier Envio or schema) stores `[BigInt!]` as text[]; a schema migrated by
- * Envio 3.6.1 stores numeric[]. Both hold the same integers.
- */
-export const LEGACY_UDTS: Partial<Record<ColumnKind, readonly string[]>> = {
-  decimalList: ['_text'],
-};
-
 /** Whether a Postgres column type is acceptable for a column. */
-export const udtMatches = (c: Column, udt: string): boolean =>
-  udt === c.pgUdt || (LEGACY_UDTS[c.kind]?.includes(udt) ?? false);
+export const udtMatches = (c: Column, udt: string): boolean => codec(c).pgUdts.includes(udt);
+
+/** `entity`'s columns through `expr`, each kept under its own name. */
+const selectList = (
+  entity: Entity,
+  expr: (codec: ColumnCodec) => (col: string) => string,
+): string =>
+  entity.columns
+    .map((c) => {
+      const col = quote(c.name);
+      const e = expr(codec(c))(col);
+      return e === col ? col : `${e} AS ${col}`;
+    })
+    .join(', ');
 
 /** Postgres select list: numbers as text (lists as text[]), everything else as stored. */
-export function pgSelectList(entity: Entity): string {
-  return entity.columns
-    .map((c) => {
-      const col = quote(c.name);
-      if (c.pgUdt === 'numeric') return `${col}::text AS ${col}`;
-      if (c.kind === 'decimalList') return `${col}::text[] AS ${col}`;
-      return col;
-    })
-    .join(', ');
-}
+export const pgSelectList = (entity: Entity): string => selectList(entity, (c) => c.pgSelect);
 
 /** DuckDB select list over the Postgres rows: the casts that make the file. */
-export function duckCastList(entity: Entity): string {
-  return entity.columns
-    .map((c) => {
-      const col = quote(c.name);
-      if (c.kind === 'decimal') return `${col}::HUGEINT::DECIMAL(38,0) AS ${col}`;
-      if (c.kind === 'decimalList')
-        return `list_transform(${col}, v -> v::HUGEINT::DECIMAL(38,0)) AS ${col}`;
-      return col;
-    })
-    .join(', ');
-}
+export const dkCastList = (entity: Entity): string => selectList(entity, (c) => c.dkCast);
 
-/** The null marker in canonical text; cannot collide with a stored value here. */
+/** Restore: DuckDB select list from the file into staging, numbers as exact text. */
+export const fromFileList = (entity: Entity): string => selectList(entity, (c) => c.fromFile);
+
+/**
+ * Restore: Postgres select list from staging into the entity table.
+ *
+ * @param entity - Entity table definitions.
+ * @param udts - The target's actual column types, by column name.
+ */
+export const toPgList = (entity: Entity, udts: Map<string, string>): string =>
+  entity.columns
+    .map((c) => codec(c).toPg(quote(c.name), udts.get(c.name) ?? codec(c).pgUdts[0]))
+    .join(', ');
+
+/** The null marker in canonical text; no stored value here is the text `\N`. */
 const NULL_TEXT = '\\N';
+
+export interface CheckValue {
+  name: string;
+  pgValue: string;
+  dkValue: string;
+}
 
 /**
  * One row as text, identical in both dialects for identical values. Booleans
  * as t/f, numbers in plain integer form, lists comma-joined, nulls as \N.
+ * Values are joined with `|`, which no stored value here contains.
  */
-function canonicalText(entity: Entity, dialect: 'pg' | 'duck'): string {
-  const text = dialect === 'pg' ? 'text' : 'VARCHAR';
+function canonicalText(entity: Entity, dialect: 'pg' | 'dk'): string {
   const parts = entity.columns.map((c) => {
     const col = quote(c.name);
-    let expr: string;
-    switch (c.kind) {
-      case 'text':
-        expr = dialect === 'pg' && c.pgUdt === 'numeric' ? `${col}::text` : col;
-        break;
-      case 'int':
-      case 'decimal':
-        expr = `${col}::${text}`;
-        break;
-      case 'bool':
-        expr = `CASE WHEN ${col} THEN 't' ELSE 'f' END`;
-        break;
-      case 'decimalList':
-        expr =
-          dialect === 'pg'
-            ? `array_to_string(${col}, ',')`
-            : `array_to_string(list_transform(${col}, v -> v::VARCHAR), ',')`;
-        break;
-    }
+    const expr = dialect === 'pg' ? codec(c).pgText(col) : codec(c).dkText(col);
     return c.nullable ? `coalesce(${expr}, ${literal(NULL_TEXT)})` : expr;
   });
   return `concat_ws('|', ${parts.join(', ')})`;
 }
 
-export interface CheckValue {
-  /** Key in the manifest: `rows` or `fingerprint`. */
-  key: string;
-  pg: string;
-  duck: string;
-}
-
 /**
- * Check values for one entity. Each is an aggregate returned as text, so
- * Postgres and DuckDB results compare as strings and stay exact.
+ * The aggregates that prove a table and a file hold the same rows.
  *
- * - `rows`: count(*)
- * - `fingerprint`: sum of a 60-bit md5 prefix of every row's canonical text.
- *   Any changed value in any row changes it (with probability 1 − 2⁻⁶⁰), so it
- *   replaces a row-by-row compare, needs no ordering (the database collation
- *   is en_US, not byte order) and runs in one pass.
+ * @param entity - The entity whose table or file is checked.
+ * @returns SQL select expressions per check, keyed as in the manifest.
  */
 export function checkValues(entity: Entity): CheckValue[] {
   return [
-    { key: 'rows', pg: 'count(*)::text', duck: 'count(*)::VARCHAR' },
+    { name: 'rows', pgValue: 'count(*)::text', dkValue: 'count(*)::VARCHAR' },
     {
-      key: 'fingerprint',
-      pg: `sum(('x' || substr(md5(${canonicalText(entity, 'pg')}), 1, 15))::bit(60)::bigint)::text`,
-      duck: `sum(('0x' || substr(md5(${canonicalText(entity, 'duck')}), 1, 15))::BIGINT)::VARCHAR`,
+      name: 'fingerprint',
+      pgValue: `sum(('x' || substr(md5(${canonicalText(entity, 'pg')}), 1, 15))::bit(60)::bigint)::text`,
+      dkValue: `sum(('0x' || substr(md5(${canonicalText(entity, 'dk')}), 1, 15))::BIGINT)::VARCHAR`,
     },
   ];
 }
