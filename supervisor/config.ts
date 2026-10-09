@@ -1,13 +1,22 @@
 import { parseArgs } from 'node:util';
+import { POLYGON_BLOCK_SECONDS } from '#supervisor/chain.ts';
 import type { DuckDBConfig } from '#supervisor/restore.ts';
 
 const SCHEDULES = ['monthly', 'weekly', 'stride'] as const;
 export type Schedule = (typeof SCHEDULES)[number];
 
+/** Seconds in a day. */
+const DAY = 86_400;
+/** Blocks in a schedule's period, at Polygon's average block time. */
+const PERIOD_STRIDES = {
+  weekly: Math.round((7 * DAY) / POLYGON_BLOCK_SECONDS),
+  monthly: Math.round((30 * DAY) / POLYGON_BLOCK_SECONDS),
+} as const;
+
 export interface SupervisorConfig extends DuckDBConfig {
   /** null: no scheduled snapshots. */
   schedule: Schedule | null;
-  /** Blocks between snapshots; set only for the stride schedule. */
+  /** Blocks between snapshots; set whenever a schedule is, null otherwise. */
   stride: number | null;
   /** Archive, then delete, closed rows and old trades. */
   prune: boolean;
@@ -93,6 +102,11 @@ export function parseConfig(
     memoryLimit,
     prune: values.prune,
     debug: values.debug,
-    stride: values.stride === undefined ? null : parsePositiveInt('--stride', values.stride),
+    stride:
+      schedule === null
+        ? null
+        : schedule === 'stride'
+          ? parsePositiveInt('--stride', values.stride!)
+          : PERIOD_STRIDES[schedule],
   };
 }
