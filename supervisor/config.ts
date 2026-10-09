@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { POLYGON_BLOCK_SECONDS } from '#supervisor/chain.ts';
-import type { DuckDBConfig } from '#supervisor/restore.ts';
+import type { DuckDBConfig } from '#tools/duckdb.ts';
 
 const SCHEDULES = ['monthly', 'weekly', 'stride'] as const;
 export type Schedule = (typeof SCHEDULES)[number];
