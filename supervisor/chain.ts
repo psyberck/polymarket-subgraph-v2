@@ -8,8 +8,6 @@ export const POLYGON_BLOCK_SECONDS = 2;
 export interface Rpc {
   /** The latest block. */
   head(): Promise<{ number: number; timestamp: number }>;
-  /** A block's timestamp, in seconds. */
-  timestamp(block: number): Promise<number>;
   /** The `finalized` block number, or null if the endpoint does not report one. */
   finalized(): Promise<number | null>;
   /** Whether the endpoint answers at all. */
@@ -63,19 +61,10 @@ export async function createRpc(url?: string, signal?: AbortSignal): Promise<Rpc
     await sleepFor(delay, undefined, { signal });
   }
 
-  const timestamps = new Map<number, number>();
   return {
     async head() {
       const block = await client.getBlock({ blockTag: 'latest' });
       return { number: Number(block.number), timestamp: Number(block.timestamp) };
-    },
-
-    async timestamp(block) {
-      const cached = timestamps.get(block);
-      if (cached !== undefined) return cached;
-      const { timestamp } = await client.getBlock({ blockNumber: BigInt(block) });
-      timestamps.set(block, Number(timestamp));
-      return Number(timestamp);
     },
 
     async finalized() {
