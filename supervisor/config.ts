@@ -49,8 +49,8 @@ function parsePositiveInt(name: string, value: string): number {
 /**
  * Parse the supervisor's flags and environment.
  *
- * @param args - command-line arguments, without node and the script path.
- * @param env - environment; defaults to process.env.
+ * @param args - Command-line arguments, without node and the script path.
+ * @param env - Environment; process.env by default.
  * @returns The settings.
  * @throws InvalidValueError naming the offending flag or variable.
  */

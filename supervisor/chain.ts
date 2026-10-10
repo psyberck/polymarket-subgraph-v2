@@ -34,7 +34,7 @@ export interface PolygonChainState {
  *
  * @param url - The endpoint, normally POLYGON_RPC_URL.
  * @param signal - Aborting it stops the wait.
- * @returns The client; block timestamps are cached.
+ * @returns The client.
  * @throws Error if `url` is not set.
  * @throws AbortError if `signal` is aborted while waiting.
  */

@@ -163,12 +163,18 @@ export function parseSchema(source: string): Entity[] {
   });
 }
 
-/** Entities from the indexer's schema.graphql. */
+/**
+ * Load the entities from the indexer's schema.graphql.
+ *
+ * @param path - The schema file; the indexer's by default.
+ * @returns Entities in file order, as parseSchema returns them.
+ * @throws GraphQLError on a syntax error, Error on a type with no mapping.
+ */
 export function loadSchema(path = new URL('../schema.graphql', import.meta.url)): Entity[] {
   return parseSchema(readFileSync(path, 'utf8'));
 }
 
-/** Whether a Postgres column type is acceptable for a column. */
+/** Whether a Postgres column type (udt_name) is one the column accepts. */
 export const udtMatches = (c: Column, udt: string): boolean => codec(c).pgUdts.includes(udt);
 
 /** `entity`'s columns through `expr`, each kept under its own name. */
@@ -184,21 +190,16 @@ const selectList = (
     })
     .join(', ');
 
-/** Postgres select list: numbers as text (lists as text[]), everything else as stored. */
+/** Export: Postgres select list, numbers as text (lists as text[]), the rest as stored. */
 export const pgSelectList = (entity: Entity): string => selectList(entity, (c) => c.pgSelect);
 
-/** DuckDB select list over the Postgres rows: the casts that make the file. */
+/** Export: DuckDB select list over the Postgres rows, cast to the Parquet types. */
 export const dkCastList = (entity: Entity): string => selectList(entity, (c) => c.dkCast);
 
 /** Restore: DuckDB select list from the file into staging, numbers as exact text. */
 export const fromFileList = (entity: Entity): string => selectList(entity, (c) => c.fromFile);
 
-/**
- * Restore: Postgres select list from staging into the entity table.
- *
- * @param entity - Entity table definitions.
- * @param udts - The target's actual column types, by column name.
- */
+/** Restore: Postgres select list from staging, cast to the target's types (`udts`). */
 export const toPgList = (entity: Entity, udts: Map<string, string>): string =>
   entity.columns
     .map((c) => codec(c).toPg(quote(c.name), udts.get(c.name) ?? codec(c).pgUdts[0]))
@@ -211,6 +212,24 @@ export interface CheckValue {
   name: string;
   pgValue: string;
   dkValue: string;
+}
+
+/** Computed check values, as text, by check name. */
+export type CheckRow = Record<string, string | null>;
+
+/**
+ * Compare two sets of check values.
+ *
+ * @param labelA - What `a` is, for the message (e.g. postgres).
+ * @param a - One side's check values.
+ * @param labelB - What `b` is, for the message (e.g. parquet).
+ * @param b - The other side's check values.
+ * @returns One line per check that differs; empty if they all match.
+ */
+export function diffCheckRows(labelA: string, a: CheckRow, labelB: string, b: CheckRow): string[] {
+  return [...new Set([...Object.keys(a), ...Object.keys(b)])]
+    .filter((k) => (a[k] ?? null) !== (b[k] ?? null))
+    .map((k) => `${k}: ${labelA} ${a[k]} ${labelB} ${b[k]}`);
 }
 
 /**
@@ -228,10 +247,10 @@ function canonicalText(entity: Entity, dialect: 'pg' | 'dk'): string {
 }
 
 /**
- * The aggregates that prove a table and a file hold the same rows.
+ * Build the aggregates that prove a table and a file hold the same rows.
  *
  * @param entity - The entity whose table or file is checked.
- * @returns SQL select expressions per check, keyed as in the manifest.
+ * @returns Each check's name and its Postgres and DuckDB expressions.
  */
 export function checkValues(entity: Entity): CheckValue[] {
   return [
