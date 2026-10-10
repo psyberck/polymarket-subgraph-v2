@@ -5,8 +5,9 @@ import type { DuckDBConfig } from '#tools/duckdb.ts';
 const SCHEDULES = ['monthly', 'weekly', 'stride'] as const;
 export type Schedule = (typeof SCHEDULES)[number];
 
+export const CHAIN_ID = 137;
 /** Seconds in a day. */
-const DAY = 86_400;
+export const DAY = 86_400;
 /** Blocks in a schedule's period, at Polygon's average block time. */
 const PERIOD_STRIDES = {
   weekly: Math.round((7 * DAY) / POLYGON_BLOCK_SECONDS),

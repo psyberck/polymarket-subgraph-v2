@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import { pgConfig, pgSchema, table, transaction } from '#tools/postgres.ts';
 import { Client } from 'pg';
 import { getPolygonChainState } from '#supervisor/chain.ts';
+import { CHAIN_ID } from '#supervisor/config.ts';
 
-const CHAIN_ID = 137;
 const INDEXER_DIR = fileURLToPath(new URL('..', import.meta.url));
 const INDEXER_PID_DIR = join(homedir(), '.envio');
 const LOCK_QUERY_TIMEOUT_MS = 10_000;
