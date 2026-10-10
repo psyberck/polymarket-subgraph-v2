@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { pgConfig, pgSchema, table, transaction } from '#tools/postgres.ts';
+import { pgConfig, pgSchema, pool, table, transaction } from '#tools/postgres.ts';
 import { Client } from 'pg';
 import { getPolygonChainState } from '#supervisor/chain.ts';
 import { CHAIN_ID } from '#supervisor/config.ts';
@@ -16,7 +16,6 @@ const INDEXER_PID_DIR = join(homedir(), '.envio');
 const LOCK_QUERY_TIMEOUT_MS = 10_000;
 const PG_UNDEFINED_OBJECT = '42704';
 
-/** Indexer, its process or its schema is not in the state the supervisor expects. */
 export class InternalError extends Error {}
 /** The supervisor lock is held by another session, or no longer held by this one. */
 export class LockHeldError extends InternalError {}
@@ -315,4 +314,17 @@ export class Indexer implements AsyncDisposable {
   [Symbol.asyncDispose](): Promise<void> {
     return this.close();
   }
+}
+
+/** Indexer, its process or its schema is not in the state the supervisor expects. */
+/**
+ * Read Envio's version from the config it records in envio_info.
+ *
+ * @returns The version, or null if none is recorded.
+ */
+export async function getEnvioVersion(): Promise<string | null> {
+  const { rows } = await pool.query<{ version: string | null }>(
+    `SELECT config::jsonb->>'version' AS version FROM ${table('envio_info')} LIMIT 1`,
+  );
+  return rows[0]?.version ?? null;
 }
