@@ -1,9 +1,6 @@
 import type { EvmEvent, EvmOnEventContext } from 'envio';
-import { COLLATERAL_SCALE } from '@utils/constants';
+import { CLOSED_POSITION_DUST, COLLATERAL_SCALE } from '@utils/constants';
 import { loadUserPosition } from '@utils/loadUserPosition';
-
-/** 0.1 tokens. */
-const CLOSED_POSITION_DUST = COLLATERAL_SCALE / 10n;
 
 /**
  * Book a sell at average cost: realize PnL against the fee-inclusive cost

@@ -73,6 +73,9 @@ const NEG_RISK_CTF_COLLATERAL_ADAPTER_V2 = '0xada2005600dec949baf300f4c6120000bd
 /** One unit of collateral; every amount and price is in 1e6. */
 const COLLATERAL_SCALE = 1_000_000n;
 
+/** Below this balance (0.1 tokens) a sold-down position counts as closed: rounding leaves dust. */
+const CLOSED_POSITION_DUST = COLLATERAL_SCALE / 10n;
+
 /** 0.50, the price of one leg of a binary split. */
 const FIFTY_CENTS = COLLATERAL_SCALE / 2n;
 
@@ -91,6 +94,7 @@ type TradeType = (typeof TradeType)[keyof typeof TradeType];
 export {
   AUTO_REDEEMER,
   AUTO_REDEEMER_V1,
+  CLOSED_POSITION_DUST,
   COLLATERAL_SCALE,
   COMBOS_EXCHANGE,
   COMBOS_POSITION_MANAGER,
