@@ -20,7 +20,7 @@ export interface DuckDB extends Disposable {
  * Open an in-memory DuckDB with the indexer's Postgres attached as `pg`.
  *
  * @param config - DuckDB memory limit and threads.
- * @param readOnly - Attach Postgres writable; read-only by default.
+ * @param readOnly - Attach Postgres read-only (default); false to write, as restore does.
  * @returns The connection; dispose it (`using`) to close it, its instance and
  *   its spill folder.
  * @throws Error if the postgres extension cannot be installed or loaded, or
@@ -68,7 +68,26 @@ export async function createDuckDB(
   }
 }
 
-/** `postgres_query` over the attached database; the SQL is dollar-quoted. */
+/**
+ * Wrap Postgres SQL as a DuckDB table function over the attached database.
+ *
+ * @param sql - Postgres SQL, run as is; it is dollar-quoted.
+ * @returns A `postgres_query('pg', ...)` expression to select from.
+ */
 export function pgQuery(sql: string): string {
   return `postgres_query('pg', $$${sql}$$)`;
+}
+
+/**
+ * Run a DuckDB query and read every row.
+ *
+ * @param conn - The DuckDB connection.
+ * @param sql - DuckDB SQL.
+ * @returns Each row as an object; big numbers come back as text.
+ */
+export async function queryRows(
+  conn: DuckDBConnection,
+  sql: string,
+): Promise<Record<string, unknown>[]> {
+  return (await conn.runAndReadAll(sql)).getRowObjectsJson();
 }
