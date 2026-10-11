@@ -88,6 +88,9 @@ export const outputFolderPath = (outputDir: string, blockId: number): string =>
 export const snapshotEntities = (entities: Entity[]): Entity[] =>
   entities.filter((e) => !NOT_IN_RESTORE_POINT.has(e.name));
 
+/** Seconds since `start` (a Date.now() value), for step timings. */
+export const since = (start: number): string => `${((Date.now() - start) / 1000).toFixed(1)}s`;
+
 /**
  * List a snapshot's files: trades, finalized positions, then the restore
  * point. The two position files are disjoint.

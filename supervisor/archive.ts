@@ -25,12 +25,12 @@ import {
   type ManifestHeader,
   outputFolderPath,
   sha256,
+  since,
   type SnapshotFile,
   snapshotFiles,
   snapshotManifests,
   writeManifest,
 } from '#supervisor/snapshot.ts';
-import { since } from '#supervisor/utils.ts';
 
 /** Rows per Parquet row group. */
 const ROW_GROUP_ROWS = 1_000_000;
