@@ -2,6 +2,7 @@ import { setTimeout as sleepFor } from 'node:timers/promises';
 import { createPublicClient, http } from 'viem';
 import { polygon } from 'viem/chains';
 import { pgSchema, pool, table } from '#tools/postgres.ts';
+import type { SupervisorConfig } from '#supervisor/config.ts';
 
 export const POLYGON_BLOCK_SECONDS = 2;
 
@@ -114,4 +115,23 @@ export async function getPolygonChainState(): Promise<PolygonChainState | null> 
     sourceBlock: r.source_block,
     maxReorgDepth: r.max_reorg_depth,
   };
+}
+
+/** Whether Envio is paused at a snapshot boundary: a schedule is set and it reached its end block. */
+export const atBoundary = (config: SupervisorConfig, chain: PolygonChainState): boolean =>
+  config.schedule !== null && chain.endBlock !== null && chain.progressBlock === chain.endBlock;
+
+/**
+ * Decide the block Envio should stop at next.
+ *
+ * @param config - The schedule and its stride.
+ * @param chain - Envio's chain state.
+ * @returns The pending boundary if Envio has not reached it, else one stride
+ *   past its progress; null without a schedule.
+ */
+export function nextEndBlockId(config: SupervisorConfig, chain: PolygonChainState): number | null {
+  const progress = Math.max(chain.progressBlock, chain.startBlock - 1);
+  if (config.schedule !== null && chain.endBlock !== null && progress < chain.endBlock)
+    return chain.endBlock;
+  return config.stride === null ? null : progress + config.stride;
 }
