@@ -25,14 +25,11 @@ export const TRADES_FILE = `${ORDER_ENTITY}.parquet`;
 /** Finalized positions; prune deletes their ids. */
 export const FINALIZED_FILE = 'UserPosition.finalized.parquet';
 
-/** 0.1 tokens: below it a position counts as closed, as in the sell handler. */
-const CLOSED_POSITION_DUST = 100_000n;
-
 /**
  * Positions that can no longer change: closed, on a resolved market. A closed
  * position on an open market can be re-entered, so it does not qualify.
  */
-export const FINALIZED_POSITIONS = `amount < ${CLOSED_POSITION_DUST} AND EXISTS (SELECT 1 FROM ${table('Condition')} c WHERE c.id = ${table('UserPosition')}."conditionId" AND c."payoutPrices" IS NOT NULL)`;
+export const FINALIZED_POSITIONS = `amount = 0 AND EXISTS (SELECT 1 FROM ${table('Condition')} c WHERE c.id = ${table('UserPosition')}."conditionId" AND c."payoutPrices" IS NOT NULL)`;
 
 /**
  * Not in the restore point: OrderFilled is archived per interval; SplitMarker

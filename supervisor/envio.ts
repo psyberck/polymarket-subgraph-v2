@@ -316,7 +316,6 @@ export class Indexer implements AsyncDisposable {
   }
 }
 
-/** Indexer, its process or its schema is not in the state the supervisor expects. */
 /**
  * Read Envio's version from the config it records in envio_info.
  *
