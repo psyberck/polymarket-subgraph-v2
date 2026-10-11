@@ -200,9 +200,9 @@ export const dkCastList = (entity: Entity): string => selectList(entity, (c) => 
 export const fromFileList = (entity: Entity): string => selectList(entity, (c) => c.fromFile);
 
 /** Restore: Postgres select list from staging, cast to the target's types (`udts`). */
-export const toPgList = (entity: Entity, udts: Map<string, string>): string =>
+export const toPgList = (entity: Entity, udts?: Map<string, string>): string =>
   entity.columns
-    .map((c) => codec(c).toPg(quote(c.name), udts.get(c.name) ?? codec(c).pgUdts[0]))
+    .map((c) => codec(c).toPg(quote(c.name), udts?.get(c.name) ?? codec(c).pgUdts[0]))
     .join(', ');
 
 /** The null marker in canonical text; no stored value here is the text `\N`. */
