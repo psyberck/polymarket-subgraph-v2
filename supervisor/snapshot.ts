@@ -29,9 +29,12 @@ const CLOSED_POSITION_DUST = 100_000n;
  * Positions that can no longer change: closed, on a resolved market. A closed
  * position on an open market can be re-entered, so it does not qualify.
  */
-export const FINALIZED_POSITIONS = `amount < ${CLOSED_POSITION_DUST} AND "conditionId" IN (SELECT id FROM ${table('Condition')} WHERE "payoutPrices" IS NOT NULL)`;
+export const FINALIZED_POSITIONS = `amount < ${CLOSED_POSITION_DUST} AND EXISTS (SELECT 1 FROM ${table('Condition')} c WHERE c.id = ${table('UserPosition')}."conditionId" AND c."payoutPrices" IS NOT NULL)`;
 
-/** Not in the restore point: OrderFilled is archived per interval, SplitMarker cleared. */
+/**
+ * Not in the restore point: OrderFilled is archived per interval; SplitMarker
+ * rows are dead at a block boundary (prune clears them, with `--prune`).
+ */
 const NOT_IN_RESTORE_POINT = new Set(['OrderFilled', 'SplitMarker']);
 
 /** One file to export: an entity's rows, optionally filtered. */
