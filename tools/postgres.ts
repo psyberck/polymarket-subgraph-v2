@@ -62,23 +62,25 @@ export async function transaction<T>(fn: (client: PoolClient) => Promise<T>): Pr
 }
 
 /**
- * Run a statement, discarding any result.
+ * Run a statement, discarding any rows it returns.
  *
  * @param sql - the statement.
  * @param params - bound parameters; never interpolated into `sql`.
+ * @returns How many rows it affected (0 when it reports none).
  */
-export async function exec(sql: string, params: readonly unknown[] = []): Promise<void> {
-  await pool.query(sql, params as unknown[]);
+export async function exec(sql: string, params: readonly unknown[] = []): Promise<number> {
+  return (await pool.query(sql, params as unknown[])).rowCount ?? 0;
 }
 
 /**
  * One number out of Postgres.
  *
  * @param sql - a query whose first column of its first row is a count.
+ * @param params - bound parameters; never interpolated into `sql`.
  * @returns The value, or 0 when the query returned no rows.
  */
-export async function count(sql: string): Promise<number> {
-  const res = await pool.query<Record<string, string>>(sql);
+export async function count(sql: string, params: readonly unknown[] = []): Promise<number> {
+  const res = await pool.query<Record<string, string>>(sql, params as unknown[]);
   const row = res.rows[0];
   return row ? Number(Object.values(row)[0] ?? 0) || 0 : 0;
 }
