@@ -14,10 +14,13 @@ import { queryRows } from '#tools/duckdb.ts';
 import type { Schedule } from '#supervisor/config.ts';
 import { type CheckRow, checkValues, codec, type Entity } from '#supervisor/typemap.ts';
 
+export const MARKER_ENTITY = 'SplitMarker';
+export const ORDER_ENTITY = 'OrderFilled';
+
 export const MANIFEST_FILE = 'manifest.json';
 
 /** Trades in (startBlockId, endBlockId]. */
-export const TRADES_FILE = 'OrderFilled.parquet';
+export const TRADES_FILE = `${ORDER_ENTITY}.parquet`;
 
 /** Finalized positions; prune deletes their ids. */
 export const FINALIZED_FILE = 'UserPosition.finalized.parquet';
@@ -35,7 +38,7 @@ export const FINALIZED_POSITIONS = `amount < ${CLOSED_POSITION_DUST} AND EXISTS 
  * Not in the restore point: OrderFilled is archived per interval; SplitMarker
  * rows are dead at a block boundary (prune clears them, with `--prune`).
  */
-const NOT_IN_RESTORE_POINT = new Set(['OrderFilled', 'SplitMarker']);
+const NOT_IN_RESTORE_POINT = new Set([ORDER_ENTITY, MARKER_ENTITY]);
 
 /** One file to export: an entity's rows, optionally filtered. */
 export interface SnapshotFile {
