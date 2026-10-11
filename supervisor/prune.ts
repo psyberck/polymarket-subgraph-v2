@@ -5,6 +5,7 @@ import { createDuckDB } from '#tools/duckdb.ts';
 import {
   FINALIZED_FILE,
   type Manifest,
+  MARKER_ENTITY,
   outputFolderPath,
   since,
   type SnapshotFile,
@@ -18,6 +19,14 @@ import type { SupervisorConfig } from '#supervisor/config.ts';
 
 /** Ids per DELETE or count query. */
 const ID_BATCH = 10_000;
+
+/**
+ * What pruneFile deletes: a snapshot file's rows, or with `name: null` every
+ * row matching `where`, for an entity that is never archived.
+ */
+interface PruneTarget extends Omit<SnapshotFile, 'name'> {
+  name: string | null;
+}
 
 /**
  * Read one file's row count from a manifest.
@@ -51,38 +60,46 @@ async function* getIdBatches(conn: DuckDBConnection, file: string) {
 /**
  * Delete the rows a snapshot file lists, committing each batch; a retry
  * deletes what is left. Then check no row still matches the file's WHERE
- * clause, i.e. nothing was missed by the archive.
+ * clause, i.e. nothing was missed by the archive. A target without a file
+ * deletes by its WHERE clause instead, then runs the same check.
  *
  * @param conn - DuckDB, to read the file's ids.
  * @param folder - The snapshot folder.
- * @param target - The file, as snapshotFiles describes it.
+ * @param target - The file, as snapshotFiles describes it, or `name: null`.
  * @param signal - Aborting it stops between batches; a retry finishes the job.
  * @returns How many rows were deleted; 0 once an earlier attempt deleted them.
- * @throws Error if the file has no WHERE clause, or rows matching it are
+ * @throws Error if the target has no WHERE clause, or rows matching it are
  *   left (those are kept); the abort reason once `signal` is aborted.
  */
 async function pruneFile(
   conn: DuckDBConnection,
   folder: string,
-  target: SnapshotFile,
+  target: PruneTarget,
   signal: AbortSignal,
 ): Promise<number> {
   let rows = 0;
   const { name, entity, where } = target;
-  if (!where) throw new Error(`prune: ${name} has no WHERE clause to check the delete against`);
-  for await (const ids of getIdBatches(conn, join(folder, name))) {
+  const source = name ?? `${entity.name} WHERE ${where}`;
+  if (!where) throw new Error(`prune: ${source} has no WHERE clause to check the delete against`);
+  if (name === null) {
     signal.throwIfAborted();
-    rows += await exec(`DELETE FROM ${table(entity.name)} WHERE id = ANY($1)`, [ids]);
+    rows = await exec(`DELETE FROM ${table(entity.name)} WHERE ${where}`);
+  } else {
+    for await (const ids of getIdBatches(conn, join(folder, name))) {
+      signal.throwIfAborted();
+      rows += await exec(`DELETE FROM ${table(entity.name)} WHERE id = ANY($1)`, [ids]);
+    }
   }
   const left = await count(`SELECT count(*) AS n FROM ${table(entity.name)} WHERE ${where}`);
   if (left > 0)
-    throw new Error(`prune: ${left} ${entity.name} rows match ${name} but are not in it`);
+    throw new Error(`prune: ${left} ${entity.name} rows match ${source} but were not deleted`);
   return rows;
 }
 
 /**
  * Prune at the block Envio has paused at: delete the trades and finalized
- * positions its snapshot archived. With `--debug`, only log the counts.
+ * positions its snapshot archived, then every SplitMarker. With `--debug`,
+ * only log the counts.
  *
  * @param config - Output directory, `--debug` and DuckDB limits.
  * @param chain - Envio's chain state; `progressBlock` is the paused block.
@@ -112,7 +129,8 @@ export async function pruneAt(
   );
   if (config.debug) return;
 
-  const files = snapshotFiles(loadSchema(), manifest.startBlockId, endBlockId);
+  const entities = loadSchema();
+  const files = snapshotFiles(entities, manifest.startBlockId, endBlockId);
   const target = (name: string) => files.find((f) => f.name === name)!;
   const folder = outputFolderPath(config.outputDir, endBlockId);
   using db = await createDuckDB(config);
@@ -127,10 +145,20 @@ export async function pruneAt(
       );
   }
 
+  let markers = 0;
   const positions = await pruneFile(db.conn, folder, target(FINALIZED_FILE), signal);
   const trades = await pruneFile(db.conn, folder, target(TRADES_FILE), signal);
+  const marker = entities.find((e) => e.name === MARKER_ENTITY);
+  if (marker) {
+    markers = await pruneFile(
+      db.conn,
+      folder,
+      { name: null, entity: marker, where: 'TRUE' },
+      signal,
+    );
+  }
   console.log(
-    `prune: deleted ${positions} positions and ${trades} trades successfully (${since(started)})`,
+    `prune: deleted ${positions} positions, ${trades} trades and ${markers} split markers successfully (${since(started)})`,
   );
 }
 
