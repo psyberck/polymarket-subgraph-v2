@@ -56,24 +56,28 @@ async function* getIdBatches(conn: DuckDBConnection, file: string) {
  * @param conn - DuckDB, to read the file's ids.
  * @param folder - The snapshot folder.
  * @param target - The file, as snapshotFiles describes it.
+ * @param signal - Aborting it stops between batches; a retry finishes the job.
  * @returns How many rows were deleted; 0 once an earlier attempt deleted them.
  * @throws Error if the file has no WHERE clause, or rows matching it are
- *   left (those are kept).
+ *   left (those are kept); the abort reason once `signal` is aborted.
  */
 async function pruneFile(
   conn: DuckDBConnection,
   folder: string,
   target: SnapshotFile,
+  signal: AbortSignal,
 ): Promise<number> {
+  let rows = 0;
   const { name, entity, where } = target;
   if (!where) throw new Error(`prune: ${name} has no WHERE clause to check the delete against`);
-  let deleted = 0;
-  for await (const ids of getIdBatches(conn, join(folder, name)))
-    deleted += await exec(`DELETE FROM ${table(entity.name)} WHERE id = ANY($1)`, [ids]);
+  for await (const ids of getIdBatches(conn, join(folder, name))) {
+    signal.throwIfAborted();
+    rows += await exec(`DELETE FROM ${table(entity.name)} WHERE id = ANY($1)`, [ids]);
+  }
   const left = await count(`SELECT count(*) AS n FROM ${table(entity.name)} WHERE ${where}`);
   if (left > 0)
     throw new Error(`prune: ${left} ${entity.name} rows match ${name} but are not in it`);
-  return deleted;
+  return rows;
 }
 
 /**
@@ -82,10 +86,16 @@ async function pruneFile(
  *
  * @param config - Output directory, `--debug` and DuckDB limits.
  * @param chain - Envio's chain state; `progressBlock` is the paused block.
+ * @param signal - Aborting it stops between delete batches.
  * @throws Error if the snapshot or one of its files is missing (nothing is
- *   deleted), or rows the files should hold are left in Postgres.
+ *   deleted), or rows the files should hold are left in Postgres; the abort
+ *   reason once `signal` is aborted.
  */
-export async function pruneAt(config: SupervisorConfig, chain: PolygonChainState): Promise<void> {
+export async function pruneAt(
+  config: SupervisorConfig,
+  chain: PolygonChainState,
+  signal: AbortSignal,
+): Promise<void> {
   const started = Date.now();
   const endBlockId = chain.progressBlock;
   const manifests = snapshotManifests(config.outputDir);
@@ -117,8 +127,8 @@ export async function pruneAt(config: SupervisorConfig, chain: PolygonChainState
       );
   }
 
-  const positions = await pruneFile(db.conn, folder, target(FINALIZED_FILE));
-  const trades = await pruneFile(db.conn, folder, target(TRADES_FILE));
+  const positions = await pruneFile(db.conn, folder, target(FINALIZED_FILE), signal);
+  const trades = await pruneFile(db.conn, folder, target(TRADES_FILE), signal);
   console.log(
     `prune: deleted ${positions} positions and ${trades} trades successfully (${since(started)})`,
   );
