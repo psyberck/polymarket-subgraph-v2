@@ -1,73 +1,69 @@
 /* eslint-disable @typescript-eslint/no-floating-promises -- node:test awaits describe/it itself */
-/** Trade retention's archive check (snapshot-design.md §3.7–3.8). */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { after, describe, it } from 'node:test';
+/** Snapshot layout and prune's manifest reads (snapshot-design.md §3.7–3.8). */
+import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { archivedThrough, closedPositionsWhere } from '#supervisor/prune.ts';
+import { fileRows } from '#supervisor/prune.ts';
+import {
+  FINALIZED_FILE,
+  FINALIZED_POSITIONS,
+  type Manifest,
+  snapshotFiles,
+  TRADES_FILE,
+} from '#supervisor/snapshot.ts';
+import { loadSchema } from '#supervisor/typemap.ts';
 
-const dirs: string[] = [];
-after(() => dirs.forEach((d) => rmSync(d, { recursive: true, force: true })));
+describe('fileRows', () => {
+  const manifest = {
+    endBlockId: 200,
+    files: { [TRADES_FILE]: { rows: 42 } },
+  } as unknown as Manifest;
 
-/** An output directory holding trade manifests for the given (bPrev, b] ranges. */
-function outputWith(ranges: [number, number][]): string {
-  const dir = mkdtempSync(join(tmpdir(), 'prune-test-'));
-  dirs.push(dir);
-  mkdirSync(join(dir, 'trades'));
-  for (const [bPrev, b] of ranges)
-    writeFileSync(
-      join(dir, 'trades', `b${bPrev + 1}-b${b}.parquet.manifest.json`),
-      JSON.stringify({ kind: 'trades', bPrev, b }),
-    );
-  return dir;
-}
-
-describe('archivedThrough', () => {
-  it('follows an unbroken chain to its end', () => {
-    assert.equal(
-      archivedThrough(
-        outputWith([
-          [99, 200],
-          [200, 300],
-          [300, 450],
-        ]),
-        99,
-      ),
-      450,
-    );
+  it("reads a file's row count from the manifest", () => {
+    assert.equal(fileRows(manifest, TRADES_FILE), 42);
   });
 
-  it('stops at a gap: nothing beyond it counts as archived', () => {
-    assert.equal(
-      archivedThrough(
-        outputWith([
-          [99, 200],
-          [250, 300],
-          [300, 450],
-        ]),
-        99,
-      ),
-      200,
+  it('throws for a file the manifest does not list', () => {
+    assert.throws(
+      () => fileRows(manifest, FINALIZED_FILE),
+      /invalid manifest for block 200: no UserPosition/,
     );
-  });
-
-  it('archives nothing when the chain does not start where indexing did', () => {
-    assert.equal(archivedThrough(outputWith([[150, 200]]), 99), 99);
-  });
-
-  it('archives nothing without trade files', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'prune-test-'));
-    dirs.push(dir);
-    assert.equal(archivedThrough(dir, 99), 99);
   });
 });
 
-describe('closedPositionsWhere', () => {
-  it('requires a zero balance, a resolved market and the grace period', () => {
-    const where = closedPositionsWhere(1_790_000_000);
-    assert.match(where, /amount = 0/);
-    assert.match(where, /"lastUpdatedAt" < 1790000000/);
-    assert.match(where, /"payoutPrices" IS NOT NULL/);
+describe('FINALIZED_POSITIONS', () => {
+  it('requires a balance below the dust and a resolved market, with no grace period', () => {
+    assert.match(FINALIZED_POSITIONS, /amount < 100000 /);
+    assert.match(FINALIZED_POSITIONS, /"payoutPrices" IS NOT NULL/);
+    assert.doesNotMatch(FINALIZED_POSITIONS, /lastUpdatedAt/);
+  });
+});
+
+describe('snapshotFiles', () => {
+  const files = snapshotFiles(loadSchema(), 100, 200);
+  const file = (name: string) => files.find((f) => f.name === name)!;
+
+  it('lists trades, finalized positions and the restore point', () => {
+    assert.deepEqual(
+      files.map((f) => f.name),
+      [
+        TRADES_FILE,
+        FINALIZED_FILE,
+        'UserPosition.parquet',
+        'NegRiskEvent.parquet',
+        'Condition.parquet',
+        'OutcomeToken.parquet',
+      ],
+    );
+    assert.equal(file(TRADES_FILE).where, '"blockNumber" > 100 AND "blockNumber" <= 200');
+  });
+
+  it('keeps the two position files disjoint', () => {
+    assert.equal(file(FINALIZED_FILE).where, FINALIZED_POSITIONS);
+    assert.equal(file('UserPosition.parquet').where, `(${FINALIZED_POSITIONS}) IS NOT TRUE`);
+    assert.equal(file('Condition.parquet').where, undefined);
+  });
+
+  it('refuses an empty trade interval', () => {
+    assert.throws(() => snapshotFiles(loadSchema(), 200, 200), /empty trade interval/);
   });
 });

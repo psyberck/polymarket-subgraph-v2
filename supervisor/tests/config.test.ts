@@ -2,8 +2,8 @@
 /** Supervisor flags and environment (snapshot-design.md §3.9). */
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { InvalidValueError, parseConfig, parseDuckDBLimits } from '#supervisor/config.ts';
-import { snapshotEntities } from '#supervisor/archive.ts';
+import { InvalidValueError, parseConfig } from '#supervisor/config.ts';
+import { snapshotEntities } from '#supervisor/snapshot.ts';
 import { loadSchema } from '#supervisor/typemap.ts';
 
 /** --output-dir is required; supply one unless the test is about it. */
@@ -31,6 +31,11 @@ describe('parseConfig', () => {
     assert.equal(config.debug, true);
     assert.equal(config.outputDir, '/tmp/s');
     assert.equal(parse(['--schedule=monthly']).schedule, 'monthly');
+  });
+
+  it('turns weekly and monthly into a stride at 2 s blocks', () => {
+    assert.equal(parse(['--schedule', 'weekly']).stride, 302_400);
+    assert.equal(parse(['--schedule', 'monthly']).stride, 1_296_000);
   });
 
   it('takes any positive stride with --schedule stride, with no minimum', () => {
@@ -73,8 +78,8 @@ describe('parseConfig', () => {
   });
 
   it('requires --output-dir and takes it as given', () => {
-    assert.throws(() => parseConfig([], {}), /--output-dir: expected a path/);
-    assert.throws(() => parse(['--output-dir', '']), /--output-dir: expected a path/);
+    assert.throws(() => parseConfig([], {}), /--output-dir: expected a output folder path/);
+    assert.throws(() => parse(['--output-dir', '']), /--output-dir: expected a output folder path/);
     assert.equal(parse(['--output-dir', 'out/x']).outputDir, 'out/x');
   });
 
@@ -108,7 +113,7 @@ describe('InvalidValueError', () => {
         args.join(' ') || JSON.stringify(env),
       );
     assert.throws(() => parseConfig([], {}), InvalidValueError); // no --output-dir
-    assert.throws(() => parseDuckDBLimits({ DUCKDB_MEMORY_LIMIT: 'lots' }), InvalidValueError);
+    assert.throws(() => parse([], { DUCKDB_MEMORY_LIMIT: 'lots' }), InvalidValueError);
   });
 
   it('keeps parseArgs messages and their cause', () => {

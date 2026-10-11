@@ -10,17 +10,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { DuckDBInstance, type DuckDBConnection } from '@duckdb/node-api';
+import { type DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
 import {
   checkValues,
-  duckCastList,
+  codec,
+  dkCastList,
+  type Entity,
+  fromFileList,
   loadSchema,
   parseSchema,
   pgSelectList,
-  type Entity,
+  toPgList,
   udtMatches,
 } from '#supervisor/typemap.ts';
-import { assertFileSchema, fileCheckValues } from '#supervisor/archive.ts';
+import { assertFileSchema, fileCheckValues } from '#supervisor/snapshot.ts';
 
 const entities = loadSchema();
 const byName = (name: string): Entity => {
@@ -40,17 +43,19 @@ describe('parseSchema', () => {
       entities.map((e) => e.name),
       ['UserPosition', 'OrderFilled', 'NegRiskEvent', 'Condition', 'SplitMarker', 'OutcomeToken'],
     );
-    assert.equal(col('UserPosition', 'id').parquetType, 'VARCHAR');
-    assert.equal(col('UserPosition', 'tokenId').parquetType, 'VARCHAR'); // 78 digits
-    assert.equal(col('UserPosition', 'tokenId').pgUdt, 'numeric');
-    assert.equal(col('UserPosition', 'amount').parquetType, 'DECIMAL(38,0)');
-    assert.equal(col('UserPosition', 'lastBlock').parquetType, 'INTEGER');
+    const type = (entity: string, name: string) => codec(col(entity, name)).parquetType;
+    assert.equal(type('UserPosition', 'id'), 'VARCHAR');
+    assert.equal(type('UserPosition', 'tokenId'), 'VARCHAR'); // 78 digits
+    assert.equal(col('UserPosition', 'tokenId').kind, 'bigText');
+    assert.equal(codec(col('UserPosition', 'tokenId')).pgUdts[0], 'numeric');
+    assert.equal(type('UserPosition', 'amount'), 'DECIMAL(38,0)');
+    assert.equal(type('UserPosition', 'lastBlock'), 'INTEGER');
     assert.equal(col('UserPosition', 'conditionId').nullable, true);
     assert.equal(col('UserPosition', 'amount').nullable, false);
-    assert.equal(col('Condition', 'negRisk').parquetType, 'BOOLEAN');
-    assert.equal(col('Condition', 'payoutPrices').parquetType, 'DECIMAL(38,0)[]');
+    assert.equal(type('Condition', 'negRisk'), 'BOOLEAN');
+    assert.equal(type('Condition', 'payoutPrices'), 'DECIMAL(38,0)[]');
     assert.equal(col('Condition', 'payoutPrices').nullable, true);
-    assert.equal(col('Condition', 'payoutPrices').pgUdt, '_numeric'); // Envio 3.6.1
+    assert.equal(codec(col('Condition', 'payoutPrices')).pgUdts[0], '_numeric'); // Envio 3.6.1
   });
 
   it('ignores comments, including ones that continue on the next line', () => {
@@ -75,7 +80,7 @@ describe('parseSchema', () => {
       other: String @index @config(x: "y")
     }`);
     assert.deepEqual(
-      e.columns.map((c) => [c.name, c.parquetType, c.nullable]),
+      e.columns.map((c) => [c.name, codec(c).parquetType, c.nullable]),
       [
         ['id', 'VARCHAR', false],
         ['blockNumber', 'INTEGER', false],
@@ -88,6 +93,34 @@ describe('parseSchema', () => {
     assert.throws(
       () => parseSchema('type T {\n x: Float!\n}'),
       /T\.x: type Float has no snapshot mapping/,
+    );
+  });
+
+  it('reads fields written on one line, or across lines', () => {
+    const [e] = parseSchema(`type T @storage(postgres: true) { id: ID! n:
+      Int }`);
+    assert.deepEqual(
+      e.columns.map((c) => [c.name, c.kind, c.nullable]),
+      [
+        ['id', 'text', false],
+        ['n', 'int', true],
+      ],
+    );
+  });
+
+  it('skips @derivedFrom fields, which have no column', () => {
+    const [, u] = parseSchema(`type P { id: ID! user: String! }
+      type U { id: ID! positions: [P!]! @derivedFrom(field: "user") }`);
+    assert.deepEqual(
+      u.columns.map((c) => c.name),
+      ['id'],
+    );
+  });
+
+  it('refuses definitions other than entity types', () => {
+    assert.throws(
+      () => parseSchema('enum Side { BUY SELL }'),
+      /EnumTypeDefinition is not supported/,
     );
   });
 
@@ -105,6 +138,20 @@ describe('parseSchema', () => {
     assert.match(list, /"amount"::text AS "amount"/);
     assert.match(list, /"tokenId"::text AS "tokenId"/);
     assert.doesNotMatch(list, /"lastBlock"::text/);
+  });
+});
+
+describe('restore casts', () => {
+  it('stages numbers as text and converts them back to the target type', () => {
+    const entity = byName('Condition');
+    assert.match(
+      fromFileList(entity),
+      /list_transform\("payoutPrices", v -> v::VARCHAR\) AS "payoutPrices"/,
+    );
+    const udts = (list: string) => new Map([['payoutPrices', list]]);
+    assert.match(toPgList(entity, udts('_numeric')), /"payoutPrices"::numeric\[\]$/);
+    assert.match(toPgList(entity, udts('_text')), /, "payoutPrices"$/);
+    assert.match(toPgList(byName('UserPosition'), new Map()), /"tokenId"::numeric/);
   });
 });
 
@@ -148,7 +195,7 @@ describe('export casts in DuckDB', () => {
     ) t(id, "user", "tokenId", "conditionId", amount, "avgPrice", "avgFeePrice", "realizedPnl",
         "feesPaid", "totalBought", "lastBlock", "lastLogIndex", "lastUpdatedAt")`);
     const file = join(dir, 'up.parquet');
-    await conn.run(`COPY (SELECT ${duckCastList(entity)} FROM src) TO '${file}' (FORMAT parquet)`);
+    await conn.run(`COPY (SELECT ${dkCastList(entity)} FROM src) TO '${file}' (FORMAT parquet)`);
     await assertFileSchema(conn, file, entity);
     const rows = (
       await conn.runAndReadAll(
@@ -185,7 +232,7 @@ describe('export casts in DuckDB', () => {
       ('c3', 2, false, NULL, NULL, []::VARCHAR[])
     ) t(id, "outcomeSlotCount", "negRisk", "negRiskMarketId", "questionIndex", "payoutPrices")`);
     const file = join(dir, 'cond.parquet');
-    await conn.run(`COPY (SELECT ${duckCastList(entity)} FROM cond) TO '${file}' (FORMAT parquet)`);
+    await conn.run(`COPY (SELECT ${dkCastList(entity)} FROM cond) TO '${file}' (FORMAT parquet)`);
     await assertFileSchema(conn, file, entity);
     const rows = (
       await conn.runAndReadAll(
@@ -227,8 +274,20 @@ describe('export casts in DuckDB', () => {
     assert.equal((await fileCheckValues(conn, file, entity)).fingerprint, expected.toString());
   });
 
+  it('keeps a null boolean apart from false in the fingerprint', async () => {
+    const entity = parseSchema('type T { id: ID! b: Boolean }')[0];
+    const fp = checkValues(entity).find((c) => c.name === 'fingerprint')!.dkValue;
+    const [row] = (
+      await conn.runAndReadAll(
+        `SELECT (SELECT ${fp} FROM (SELECT 'x' AS id, NULL::BOOLEAN AS b)) AS n,
+                (SELECT ${fp} FROM (SELECT 'x' AS id, false AS b)) AS f`,
+      )
+    ).getRowObjectsJson();
+    assert.notEqual(row.n, row.f);
+  });
+
   it('defines the same check-value keys on both sides', () => {
     for (const e of entities)
-      for (const c of checkValues(e)) assert.ok(c.pg && c.duck, `${e.name} ${c.key}`);
+      for (const c of checkValues(e)) assert.ok(c.pgValue && c.dkValue, `${e.name} ${c.name}`);
   });
 });
