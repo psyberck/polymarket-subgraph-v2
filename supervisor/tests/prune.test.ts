@@ -31,8 +31,8 @@ describe('fileRows', () => {
 });
 
 describe('FINALIZED_POSITIONS', () => {
-  it('requires a balance below the dust and a resolved market, with no grace period', () => {
-    assert.match(FINALIZED_POSITIONS, /amount < 100000 /);
+  it('requires an empty balance and a resolved market, with no grace period', () => {
+    assert.match(FINALIZED_POSITIONS, /^amount = 0 /);
     assert.match(FINALIZED_POSITIONS, /"payoutPrices" IS NOT NULL/);
     assert.doesNotMatch(FINALIZED_POSITIONS, /lastUpdatedAt/);
   });

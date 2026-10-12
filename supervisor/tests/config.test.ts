@@ -129,7 +129,7 @@ describe('InvalidValueError', () => {
 });
 
 describe('snapshotEntities', () => {
-  it('is every entity but OrderFilled (trade files) and SplitMarker (cleared)', () => {
+  it('is every entity but OrderFilled (trade files) and SplitMarker (dead at a boundary)', () => {
     assert.deepEqual(
       snapshotEntities(loadSchema()).map((e) => e.name),
       ['UserPosition', 'NegRiskEvent', 'Condition', 'OutcomeToken'],
