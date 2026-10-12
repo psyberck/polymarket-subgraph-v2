@@ -3,11 +3,9 @@
  * to the chain where Gamma can't answer, then verifies. Parsing runs in worker
  * threads (utils/worker.ts); this file splits the work and gathers counters.
  */
-import { readFileSync } from 'node:fs';
 import { open, stat } from 'node:fs/promises';
 import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
-import { parse as parseYaml } from 'yaml';
 import { createPublicClient, http } from 'viem';
 import { polygon } from 'viem/chains';
 import { RAW } from '#scripts/utils/literals.ts';
@@ -15,6 +13,7 @@ import { createSinkStats, type SinkStats } from '#scripts/utils/parse.ts';
 import { count, exec } from '#tools/postgres.ts';
 import type { Request, Response } from '#scripts/utils/worker.ts';
 import { verify } from '#scripts/verify_conditions.ts';
+import { getPolygonChainState } from '#supervisor/chain.ts';
 
 /** A byte range [start, end) of whole lines. */
 interface Batch {
@@ -36,18 +35,15 @@ const WORKER_COUNT = Math.max(
 const WORKER_URL = new URL('./utils/worker.ts', import.meta.url);
 
 /**
- * start_block from config.yaml (so the seed and indexer can't disagree), and its
- * timestamp in ms, which is the payout gate.
+ * start_block and its timestamp in ms, which is the payout gate.
+ *
+ * @throws Error if the schema has not been created yet.
  */
 async function getBlockId(): Promise<{ block: bigint; ms: number }> {
-  const cfg = parseYaml(readFileSync('config.yaml', 'utf8')) as {
-    chains?: { id: number; start_block: number }[];
-  };
-  const chains = cfg.chains ?? [];
-  const chain = chains.find((c) => c.id === 137) ?? (chains.length === 1 ? chains[0] : undefined);
+  const chain = await getPolygonChainState();
   if (!chain)
-    throw new Error(`config.yaml: cannot find the polygon chain (${chains.length} defined)`);
-  const blockId = BigInt(chain.start_block);
+    throw new Error('envio_chains is missing: create the schema first (envio local db-migrate up)');
+  const blockId = BigInt(chain.startBlock);
   const block = await client.getBlock({ blockNumber: blockId });
   const ms = Number(block.timestamp) * 1000;
   console.log(`  start_block ${blockId.toString()} -> ${new Date(ms).toISOString()}`);
@@ -96,8 +92,8 @@ async function getBatches(filePath: string, n: number): Promise<Batch[]> {
 /**
  * Rebuilds the seed from the corpus; re-run whenever start_block moves.
  *
- * Refuses if UserPosition has rows (the indexer has run). TRUNCATEs first, which
- * is required: the inserts have no ON CONFLICT. If a worker fails, the rest are
+ * Refuses if UserPosition has rows (the indexer has run). TRUNCATEs first, so
+ * the only conflicts are repeats within the corpus. If a worker fails, the rest are
  * terminated and the tables stay partial until the next run.
  *
  * @param gateTs - start_block's timestamp in ms, the payout gate.

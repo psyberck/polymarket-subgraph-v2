@@ -60,8 +60,8 @@ async function run(r: Request): Promise<Response> {
   });
   const startBlock = BigInt(r.startBlock);
   const stats = createSinkStats();
-  const condOut = insertHandler('Condition', CONDITION_COLS);
-  const tokOut = insertHandler('OutcomeToken', TOKEN_COLS);
+  const condOut = insertHandler('Condition', CONDITION_COLS, 'ON CONFLICT ("id") DO NOTHING');
+  const tokOut = insertHandler('OutcomeToken', TOKEN_COLS, 'ON CONFLICT ("id") DO NOTHING');
   const negOut = insertHandler('NegRiskEvent', NEGRISK_COLS, 'ON CONFLICT ("id") DO NOTHING');
 
   const negSeen = new Set<string>();
