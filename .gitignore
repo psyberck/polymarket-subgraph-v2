@@ -1,9 +1,33 @@
+# Dependency, build
 node_modules
-.env
 generated
 .envio
 build
 dist
 
-logs/
+# Logs
 *.log
+
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Secrets
+.env
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
