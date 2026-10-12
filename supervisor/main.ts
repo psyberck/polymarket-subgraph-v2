@@ -50,7 +50,7 @@ async function iterate(
  *
  * @param args - Command-line arguments, without node and the script path.
  * @returns The exit code: 1 once Envio exits non-zero.
- * @throws CleanShutdown on SIGTERM or SIGINT; any other error is fatal.
+ * @throws CleanShutdown on SIGTERM, SIGINT or SIGHUP; any other error is fatal.
  */
 async function main(args: string[]): Promise<number> {
   const controller = new AbortController();
@@ -58,8 +58,10 @@ async function main(args: string[]): Promise<number> {
     if (controller.signal.aborted) return;
     controller.abort(new CleanShutdown(name));
   };
-  process.on('SIGTERM', () => onSignal('SIGTERM'));
-  process.on('SIGINT', () => onSignal('SIGINT'));
+
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    process.on(signal, () => onSignal(signal));
+  }
 
   const config = parseConfig(args);
   mkdirSync(config.outputDir, { recursive: true });
