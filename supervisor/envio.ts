@@ -12,6 +12,7 @@ import { getPolygonChainState } from '#supervisor/chain.ts';
 import { CHAIN_ID } from '#supervisor/config.ts';
 
 const INDEXER_DIR = fileURLToPath(new URL('..', import.meta.url));
+const TSX_CLI = fileURLToPath(import.meta.resolve('tsx/cli'));
 const INDEXER_PID_DIR = join(homedir(), '.envio');
 const LOCK_QUERY_TIMEOUT_MS = 10_000;
 const PG_UNDEFINED_OBJECT = '42704';
@@ -272,9 +273,7 @@ export class Indexer implements AsyncDisposable {
 
   /** The node arguments that run the Envio CLI with `args` under tsx. */
   private envioArgs(...args: string[]): string[] {
-    const tsx = process.env.TSX_CLI;
-    if (!tsx || !existsSync(tsx)) throw new Error('TSX_CLI is not set or missing');
-    return [tsx, 'node_modules/envio/bin.mjs', ...args];
+    return [TSX_CLI, 'node_modules/envio/bin.mjs', ...args];
   }
 
   /** Stop process group `pid` (SIGTERM, then SIGKILL) and remove its pid file. */

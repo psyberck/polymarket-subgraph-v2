@@ -10,6 +10,11 @@ repos:
         args: [--maxkb=1000]
       - id: detect-private-key
 
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+
   - repo: local
     hooks:
       - id: eslint

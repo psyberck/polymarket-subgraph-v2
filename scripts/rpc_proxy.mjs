@@ -147,7 +147,8 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(
-    `rpc proxy on http://127.0.0.1:${PORT} -> ${UPSTREAM}\n` +
+    // Only the origin: the path of a provider URL might hold an API key.
+    `rpc proxy on http://127.0.0.1:${PORT} -> ${new URL(UPSTREAM).origin}\n` +
       `  concurrency ${CONCURRENCY}, up to ${MAX_RETRIES} retries\n` +
       `  GET http://127.0.0.1:${PORT} for stats`,
   );
