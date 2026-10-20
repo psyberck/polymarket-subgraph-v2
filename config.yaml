@@ -78,8 +78,8 @@ chains:
       # an endpoint with real headroom to skip the proxy.
       url: http://127.0.0.1:8546
       for: sync
-      initial_block_interval: 500
-      interval_ceiling: 1000
+      initial_block_interval: 10
+      interval_ceiling: 20
       query_timeout_millis: 120000
     contracts:
       - name: CTFExchangeV2
