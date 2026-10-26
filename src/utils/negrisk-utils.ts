@@ -101,7 +101,9 @@ const consumeSplitMarker = async (
  * @param marketId - Neg-risk market id.
  * @param indexSet - Bitmask of the questions whose NO is converted.
  * @param amount - Tokens per leg, 1e6.
- * @param totalAmount - The total number of amount expected.
+ * @param totalAmount - The gen-2 adapter's `amountOut`, only checked, never
+ *   booked. It repeats `amount`. The (k - 1) x amount of collateral is paid
+ *   on chain but not reported in the event.
  * @param txHash - The event's transaction hash, when known; enables basket
  *   detection. The direct path has no split marker to find and omits it.
  */
@@ -133,9 +135,9 @@ const applyNegRiskConversion = async (
   const k = noQuestions.length;
   if (k === 0) return;
 
-  if (totalAmount !== undefined && totalAmount !== (BigInt(k) - 1n) * amount) {
+  if (totalAmount !== undefined && totalAmount !== amount) {
     context.log.warn(
-      `Adapter conversion amountOut unexpected: wallet=${wallet} market=${marketId} ` +
+      `Adapter conversion amountOut differs from amount: wallet=${wallet} market=${marketId} ` +
         `k=${k} amount=${amount} amountOut=${totalAmount} block=${event.block.number}`,
     );
   }
