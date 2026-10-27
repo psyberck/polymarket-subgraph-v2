@@ -8,6 +8,7 @@
  * Usage:
  *   node scripts/rpc_proxy.mjs                    # :8546, concurrency 3
  *   PROXY_CONCURRENCY=2 node scripts/rpc_proxy.mjs
+ *   PROXY_UPSTREAM=https://a.example,https://b.example node scripts/rpc_proxy.mjs
  * Then set rpc.url in config.yaml to http://127.0.0.1:8546.
  *
  */
@@ -16,23 +17,42 @@ import http from 'node:http';
 import { text } from 'node:stream/consumers';
 
 const PORT = Number(process.env.PROXY_PORT ?? 8546);
-const UPSTREAM = process.env.PROXY_UPSTREAM ?? 'https://polygon.gateway.tenderly.co';
+const UPSTREAM_URLS = (
+  process.env.PROXY_UPSTREAM ?? 'https://polygon.drpc.org,https://polygon.gateway.tenderly.co'
+)
+  .split(',')
+  .map((u) => u.trim())
+  .filter(Boolean);
 const CONCURRENCY = Number(process.env.PROXY_CONCURRENCY ?? 3);
 const MAX_RETRIES = Number(process.env.PROXY_MAX_RETRIES ?? 12);
 const BASE_DELAY_MS = Number(process.env.PROXY_BASE_DELAY_MS ?? 250);
 const MAX_DELAY_MS = Number(process.env.PROXY_MAX_DELAY_MS ?? 15_000);
 
+const upstreams = UPSTREAM_URLS.map((url) => ({
+  url,
+  host: new URL(url).host,
+  calls: 0,
+  throttled: 0,
+  errored: 0,
+}));
+
 const stats = {
   requests: 0,
-  upstream: 0,
-  throttled: 0,
   failed: 0,
-  errored: 0,
   maxQueueLength: 0,
   methodCounter: {},
 };
 
+// ── Upstream RPC provider ───────────────────────────────────────────────
+let current = 0;
+
+function markFailed(u) {
+  if (upstreams[current] === u) current = (current + 1) % upstreams.length;
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sum = (key) => upstreams.reduce((n, u) => n + u[key], 0);
+const unavailable = (status) => status === 401 || status === 403 || status === 429 || status >= 500;
 
 // ── Concurrency gate ───────────────────────────────────────────────────
 //
@@ -76,37 +96,36 @@ async function callUpstream(payload) {
     let res, text, transportErr;
 
     await acquire();
+    const upstream = upstreams[current];
     try {
-      res = await fetch(UPSTREAM, {
+      upstream.calls++;
+      res = await fetch(upstream.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
       });
       text = await res.text();
-      stats.upstream++;
     } catch (err) {
       transportErr = err;
     } finally {
       release();
     }
 
-    if (transportErr) {
-      if (isLast) throw transportErr;
-      await backoff();
-      continue;
-    }
-
-    if (res.status === 429 || res.status >= 500) {
-      if (res.status === 429) stats.throttled++;
-      else stats.errored++;
+    if (transportErr || unavailable(res.status)) {
+      if (!transportErr && res.status === 429) upstream.throttled++;
+      else upstream.errored++;
+      markFailed(upstream);
       if (isLast) {
         stats.failed++;
-        throw new Error(`upstream still failing after ${MAX_RETRIES} retries (HTTP ${res.status})`);
+        throw (
+          transportErr ??
+          new Error(`upstream still failing after ${MAX_RETRIES} retries (HTTP ${res.status})`)
+        );
       }
       await backoff();
       continue;
     }
-    return text;
+    return { status: res.status, text };
   }
 }
 
@@ -117,8 +136,17 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify(
         {
           ...stats,
+          upstream: sum('calls'),
+          throttled: sum('throttled'),
+          errored: sum('errored'),
           active,
           queued: Queue.length,
+          upstreams: upstreams.map(({ host, calls, throttled, errored }) => ({
+            host,
+            calls,
+            throttled,
+            errored,
+          })),
         },
         null,
         2,
@@ -130,8 +158,8 @@ const server = http.createServer(async (req, res) => {
   try {
     const body = await text(req);
     stats.requests++;
-    const result = await callUpstream(JSON.parse(body));
-    res.writeHead(200, { 'content-type': 'application/json' });
+    const { status, text: result } = await callUpstream(JSON.parse(body));
+    res.writeHead(status, { 'content-type': 'application/json' });
     res.end(result);
   } catch (err) {
     res.writeHead(200, { 'content-type': 'application/json' });
@@ -147,8 +175,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(
-    // Only the origin: the path of a provider URL might hold an API key.
-    `rpc proxy on http://127.0.0.1:${PORT} -> ${new URL(UPSTREAM).origin}\n` +
+    `rpc proxy on http://127.0.0.1:${PORT} -> ${upstreams.map((u) => u.host).join(', ')}\n` +
       `  concurrency ${CONCURRENCY}, up to ${MAX_RETRIES} retries\n` +
       `  GET http://127.0.0.1:${PORT} for stats`,
   );
@@ -156,11 +183,12 @@ server.listen(PORT, '127.0.0.1', () => {
 
 setInterval(() => {
   console.log(
-    `[proxy] requests=${stats.requests} upstream=${stats.upstream} ` +
-      `throttled=${stats.throttled} errored=${stats.errored} ` +
+    `[proxy] requests=${stats.requests} upstream=${sum('calls')} ` +
+      `throttled=${sum('throttled')} errored=${sum('errored')} ` +
       `failed=${stats.failed} ` +
       `currActive=${active} currQueued=${Queue.length} ` +
       `maxQueueLength=${stats.maxQueueLength} ` +
-      `methods=${JSON.stringify(stats.methodCounter)}`,
+      `methods=${JSON.stringify(stats.methodCounter)} ` +
+      `upstreams=${upstreams.map((u) => `${u.host}:${u.calls}/${u.throttled}/${u.errored}`).join(',')}`,
   );
 }, 30_000).unref();
