@@ -29,7 +29,9 @@ export const FINALIZED_FILE = 'UserPosition.finalized.parquet';
  * Positions that can no longer change: closed, on a resolved market. A closed
  * position on an open market can be re-entered, so it does not qualify.
  */
-export const FINALIZED_POSITIONS = `amount = 0 AND EXISTS (SELECT 1 FROM ${table('Condition')} c WHERE c.id = ${table('UserPosition')}."conditionId" AND c."payoutPrices" IS NOT NULL)`;
+export const FINALIZED_POSITIONS =
+  `amount = 0 AND EXISTS (SELECT 1 FROM ${table('Condition')} c WHERE c.id = ${table('UserPosition')}."conditionId" AND c."payoutPrices" IS NOT NULL` +
+  ` AND NOT EXISTS (SELECT 1 FROM ${table('Condition')} q WHERE q."negRiskMarketId" = c."negRiskMarketId" AND q."payoutPrices" IS NULL))`;
 
 /**
  * Not in the restore point: OrderFilled is archived per interval; SplitMarker
