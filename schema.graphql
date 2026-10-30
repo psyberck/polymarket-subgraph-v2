@@ -49,7 +49,8 @@ type Condition @storage(postgres: true) {
   id: ID! # conditionId
   outcomeSlotCount: Int!
   negRisk: Boolean!
-  negRiskMarketId: String # null when standalone or not yet seen
+  negRiskMarketId: String @index # null when standalone or not yet seen; indexed
+  # for FINALIZED_POSITIONS, whose per-row NOT EXISTS looks up an event's questions
   questionIndex: Int # which question of that event
   payoutPrices: [BigInt!] # settled price per outcome, 1e6; null until resolved
 }
