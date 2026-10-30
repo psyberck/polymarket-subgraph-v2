@@ -98,6 +98,8 @@ without `disown`) stops Envio's whole process group, then the supervisor exits 0
 - **Runs in steps**: sets `end_block` to the next checkpoint block and resumes the indexer until it gets there.
 - **Idempotent**: skips a checkpoint whose manifest already exists.
 - **Optional pruning**: with `--prune`, deletes the rows each checkpoint archived.
+- **Post-processing hook**: runs once per checkpoint after it is written (and pruned); see
+  [Post-processing](#post-processing).
 
 ### Checkpoint layout
 
@@ -130,6 +132,11 @@ With `--prune`, after each checkpoint is written:
    of 10,000.
 2. Fail if any row still matches a file's filter: the archive missed it, so it is kept.
 3. Delete all `SplitMarker` rows: each is read only within its own transaction, so none is needed at a block boundary.
+
+### Post-processing
+
+`processAt` in `supervisor/process.ts` is a placeholder for whatever each checkpoint should feed: an upload, an
+analysis, or a notification for you to customize.
 
 ## Restoring a checkpoint
 
@@ -185,6 +192,6 @@ dust (below 0.1 token or 0.05 USDC). Wallet-to-wallet transfers cover another 1.
 ## Tests
 
 ```sh
-node --test supervisor/tests/*.test.ts   # 47 unit tests: config, chain, typemap, snapshot, prune
+node --test supervisor/tests/*.test.ts   # 51 unit tests: config, chain, typemap, snapshot, prune, process
 pnpm typecheck && pnpm lint
 ```

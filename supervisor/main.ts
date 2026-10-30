@@ -9,6 +9,7 @@ import {
   type Rpc,
 } from '#supervisor/chain.ts';
 import { Indexer, LockHeldError } from '#supervisor/envio.ts';
+import { processAt } from '#supervisor/process.ts';
 import { pruneAt } from '#supervisor/prune.ts';
 import {
   InvalidValueError,
@@ -20,7 +21,7 @@ import {
 class CleanShutdown extends Error {}
 
 /**
- * One pass: archive (and prune) if Envio is paused at a snapshot boundary,
+ * One pass: archive (and prune, post-process) if Envio is paused at a snapshot boundary,
  * then run it to its next end block.
  *
  * @returns Envio's exit code, or null if a signal killed it.
@@ -38,6 +39,7 @@ async function iterate(
   if (atBoundary(config, chain)) {
     await archiveAt(config, chain, rpc, signal);
     if (config.prune) await pruneAt(config, chain, signal);
+    await processAt(config, chain, signal);
   }
 
   const end = nextEndBlockId(config, chain);
