@@ -27,6 +27,7 @@ const CONCURRENCY = Number(process.env.PROXY_CONCURRENCY ?? 3);
 const MAX_RETRIES = Number(process.env.PROXY_MAX_RETRIES ?? 12);
 const BASE_DELAY_MS = Number(process.env.PROXY_BASE_DELAY_MS ?? 250);
 const MAX_DELAY_MS = Number(process.env.PROXY_MAX_DELAY_MS ?? 15_000);
+const RPC_TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS ?? 30_000);
 
 const upstreams = UPSTREAM_URLS.map((url) => ({
   url,
@@ -34,6 +35,7 @@ const upstreams = UPSTREAM_URLS.map((url) => ({
   calls: 0,
   throttled: 0,
   errored: 0,
+  timeouts: 0,
 }));
 
 const stats = {
@@ -97,16 +99,22 @@ async function callUpstream(payload) {
 
     await acquire();
     const upstream = upstreams[current];
+    const signal = AbortSignal.timeout(RPC_TIMEOUT_MS);
+
     try {
       upstream.calls++;
       res = await fetch(upstream.url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
+        signal,
       });
       text = await res.text();
     } catch (err) {
       transportErr = err;
+      if (signal.aborted) {
+        upstream.timeouts++;
+      }
     } finally {
       release();
     }
@@ -136,10 +144,11 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify(
         {
           ...stats,
+          active,
           upstream: sum('calls'),
           throttled: sum('throttled'),
           errored: sum('errored'),
-          active,
+          timeouts: sum('timeouts'),
           queued: Queue.length,
           upstreams: upstreams.map(({ host, calls, throttled, errored }) => ({
             host,
@@ -176,7 +185,7 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '127.0.0.1', () => {
   console.log(
     `rpc proxy on http://127.0.0.1:${PORT} -> ${upstreams.map((u) => u.host).join(', ')}\n` +
-      `  concurrency ${CONCURRENCY}, up to ${MAX_RETRIES} retries\n` +
+      `  concurrency ${CONCURRENCY}, up to ${MAX_RETRIES} retries, ${RPC_TIMEOUT_MS / 1000}s timeout per request\n` +
       `  GET http://127.0.0.1:${PORT} for stats`,
   );
 });
