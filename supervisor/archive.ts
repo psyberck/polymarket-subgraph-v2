@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } fro
 import { setTimeout as sleepFor } from 'node:timers/promises';
 import { join } from 'node:path';
 import type { DuckDBConnection } from '@duckdb/node-api';
-import { exec, literal, pool, quote, table } from '#tools/postgres.ts';
+import { literal, pool, quote, table } from '#tools/postgres.ts';
 import { createDuckDB, pgQuery, queryRows } from '#tools/duckdb.ts';
 import {
   type CheckRow,
@@ -23,7 +23,6 @@ import {
   type Manifest,
   MANIFEST_FILE,
   type ManifestHeader,
-  OPEN_QUESTIONS_INDEX,
   outputFolderPath,
   sha256,
   since,
@@ -152,8 +151,6 @@ export async function archiveAt(
 
   const startBlockId =
     snapshots.filter((m) => m.endBlockId < endBlockId).at(-1)?.endBlockId ?? chain.startBlock - 1;
-
-  await exec(OPEN_QUESTIONS_INDEX);
 
   using db = await createDuckDB(config);
   await writeSnapshot(db.conn, config.outputDir, {
