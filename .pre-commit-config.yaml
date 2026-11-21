@@ -20,7 +20,7 @@ repos:
       - id: eslint
         name: eslint
         language: system
-        entry: eslint . --fix --max-warnings=0
+        entry: pnpm exec eslint . --fix --max-warnings=0
         files: \.(ts|tsx|js|mjs|cjs)$
         exclude: ^(node_modules|generated)/
         pass_filenames: false
@@ -28,7 +28,7 @@ repos:
       - id: prettier
         name: prettier
         language: system
-        entry: prettier --write .
+        entry: pnpm exec prettier --write .
         files: \.(ts|tsx|js|mjs|cjs|json|md|css|ya?ml)$
         exclude: ^(node_modules|generated)/
         pass_filenames: false
@@ -36,6 +36,6 @@ repos:
       - id: tsc
         name: tsc --noEmit
         language: system
-        entry: tsc --noEmit
+        entry: pnpm exec tsc --noEmit
         files: ^src/.*\.tsx?$
         pass_filenames: false

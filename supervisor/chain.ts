@@ -4,7 +4,7 @@ import { polygon } from 'viem/chains';
 import { pgSchema, pool, table } from '#tools/postgres.ts';
 import type { SupervisorConfig } from '#supervisor/config.ts';
 
-export const POLYGON_BLOCK_SECONDS = 2;
+export const POLYGON_BLOCK_SECONDS = 1.6;
 
 export interface Rpc {
   /** The latest block. */
@@ -43,7 +43,7 @@ export async function createRpc(url?: string, signal?: AbortSignal): Promise<Rpc
   if (!url) throw new Error('POLYGON_RPC_URL is not set');
   const client = createPublicClient({
     chain: polygon,
-    transport: http(url, { batch: { batchSize: 100 }, retryCount: 3, timeout: 30_000 }),
+    transport: http(url, { batch: false, retryCount: 3, timeout: 30_000 }),
   });
 
   const ping = async () => {
