@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } fro
 import { setTimeout as sleepFor } from 'node:timers/promises';
 import { join } from 'node:path';
 import type { DuckDBConnection } from '@duckdb/node-api';
-import { literal, pool, quote, table } from '#tools/postgres.ts';
+import { exec, literal, pool, quote, table } from '#tools/postgres.ts';
 import { createDuckDB, pgQuery, queryRows } from '#tools/duckdb.ts';
 import {
   type CheckRow,
@@ -23,6 +23,7 @@ import {
   type Manifest,
   MANIFEST_FILE,
   type ManifestHeader,
+  OPEN_QUESTIONS_INDEX,
   outputFolderPath,
   sha256,
   since,
@@ -107,7 +108,7 @@ export async function checkHashes(rpc: Rpc, chain: PolygonChainState): Promise<n
  * @param config - Output directory, schedule and DuckDB limits.
  * @param chain - Envio's chain state; `progressBlock` is the paused block.
  * @param rpc - The Polygon RPC client.
- * @param signal - Aborting it stops the wait for finality.
+ * @param signal - Aborting it stops the wait for finality and the retries of failed RPC calls.
  * @throws HashMismatchError if the indexed chain differs from the final one.
  */
 export async function archiveAt(
@@ -116,6 +117,23 @@ export async function archiveAt(
   rpc: Rpc,
   signal: AbortSignal,
 ): Promise<void> {
+  const retryUntilDone = async <T>(
+    fn: () => Promise<T>,
+    initialDelay = 5_000,
+    maximumDelay = 300_000,
+  ): Promise<T> => {
+    for (let delay = initialDelay; ; delay = Math.min(delay * 2, maximumDelay)) {
+      try {
+        return await fn();
+      } catch (err) {
+        if (err instanceof HashMismatchError || signal.aborted) throw err;
+        const reason = (err instanceof Error ? err.message : String(err)).split('\n')[0];
+        console.log(`execution failed (${reason}); retrying in ${delay / 1000}s`);
+      }
+      await sleepFor(delay, undefined, { signal });
+    }
+  };
+
   const startAt = Date.now();
   const endBlockId = chain.progressBlock;
   const snapshots = snapshotManifests(config.outputDir);
@@ -123,14 +141,19 @@ export async function archiveAt(
     console.log(`archive: block ${endBlockId} already archived`);
     return;
   }
-  await waitFinal(rpc, chain, signal);
-  const matched = await checkHashes(rpc, chain);
+  const { matched, blockHash } = await retryUntilDone(async () => {
+    await waitFinal(rpc, chain, signal);
+    const matched = await checkHashes(rpc, chain);
+    const blockHash = (await rpc.getBlockHashes([endBlockId])).get(endBlockId);
+    if (!blockHash) throw new Error(`no hash for block ${endBlockId}`);
+    return { matched, blockHash };
+  });
   console.log(`block ${endBlockId} has been finalized, ${matched} recorded hashes match the chain`);
-  const blockHash = (await rpc.getBlockHashes([endBlockId])).get(endBlockId);
-  if (!blockHash) throw new Error(`no hash for block ${endBlockId}`);
 
   const startBlockId =
     snapshots.filter((m) => m.endBlockId < endBlockId).at(-1)?.endBlockId ?? chain.startBlock - 1;
+
+  await exec(OPEN_QUESTIONS_INDEX);
 
   using db = await createDuckDB(config);
   await writeSnapshot(db.conn, config.outputDir, {
